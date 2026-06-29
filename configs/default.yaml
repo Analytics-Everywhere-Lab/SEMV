@@ -1,0 +1,14 @@
+llm:
+  provider: ollama
+  use_env_model_name: true
+
+pipeline:
+  default_mode: inference_only
+  evidence_top_k: 10
+  memory_top_k: 5
+
+paths:
+  cases_dir: data/cases
+  evidence_cache_dir: data/evidence_cache
+  memory_dir: data/memory
+  outputs_dir: data/outputs

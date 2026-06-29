@@ -1,0 +1,61 @@
+evaluation:
+  run_id: "mv2026_cosmos_eval_001"
+
+  datasets:
+    mv2026:
+      enabled: true
+      raw_root: "data/raw/mv2026"
+      canonical_root: "data/canonical/mv2026"
+      split: "validation"
+      use_gold_reports_after_prediction: true
+
+    cosmos:
+      enabled: true
+      raw_root: "data/raw/cosmos"
+      metadata: "data/raw/cosmos/test.jsonl"
+      image_root: "data/raw/cosmos/images"
+      canonical_root: "data/canonical/cosmos"
+      split: "test"
+      mode: "closed_world"
+
+  protocol:
+    name: "train_memory_freeze_test"
+    allow_memory_retrieval: true
+    allow_memory_update_train: true
+    allow_memory_update_test: false
+    gold_reading_stage: "after_prediction_only"
+
+  mv2026_metrics:
+    final_label: true
+    section_wise: true
+    evidence_urls: true
+    geolocation: true
+    temporal: true
+    entities: true
+    report_structure: true
+    hallucination: true
+    llm_judge: false
+
+  cosmos_metrics:
+    accuracy: true
+    balanced_accuracy: true
+    macro_f1: true
+    auroc: true
+    average_precision: true
+    ece: true
+    brier: true
+
+  thresholds:
+    geolocation:
+      within_100m: 100
+      within_500m: 500
+      within_1km: 1000
+
+    temporal:
+      exact_date_tolerance_hours: 24
+      publication_time_tolerance_minutes: 60
+
+    classification:
+      ooc_threshold: 0.5
+      abstain_lower: 0.45
+      abstain_upper: 0.55

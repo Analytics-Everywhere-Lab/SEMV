@@ -1,0 +1,9 @@
+retrieval:
+  live_web_enabled: false
+  cached_evidence_enabled: true
+  manual_case_evidence_enabled: true
+
+media:
+  enable_ffmpeg_keyframes: true
+  enable_ocr_adapter: false
+  enable_asr_adapter: false

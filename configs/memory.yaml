@@ -1,0 +1,10 @@
+retrieval:
+  top_k: 5
+  min_similarity: 0.05
+
+verification:
+  min_confidence: 0.60
+  reject_on_conflict: true
+
+consolidation:
+  duplicate_similarity: 0.85

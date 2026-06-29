@@ -1,0 +1,37 @@
+{
+  "case_id": "sample_cheapfake_001",
+  "claim": "A viral image shows the mayor at a protest yesterday in Halifax.",
+  "context": "The post claims the image is new and proves the mayor attended the protest.",
+  "media": [
+    {
+      "path": "data/cases/sample_missing_image.jpg",
+      "media_type": "image",
+      "description": "Social media screenshot showing a public figure in a crowd."
+    }
+  ],
+  "provided_evidence": [
+    {
+      "evidence_id": "manual_support_event_claim",
+      "source_type": "case_provided",
+      "source": "user_context",
+      "title": "Post text",
+      "content": "The post explicitly claims the mayor was at a protest yesterday in Halifax.",
+      "reliability": 0.45,
+      "relevance": 0.75,
+      "supports_claim_types": ["what", "where", "when", "who"],
+      "metadata": {"stance": "support"}
+    },
+    {
+      "evidence_id": "manual_attack_old_photo",
+      "source_type": "case_provided",
+      "source": "local_note",
+      "title": "Known older image note",
+      "content": "A reverse-image note says the same image circulated two years earlier from a different event, making the current context misleading.",
+      "reliability": 0.75,
+      "relevance": 0.85,
+      "supports_claim_types": ["when", "where", "authenticity"],
+      "metadata": {"stance": "attack"}
+    }
+  ],
+  "expected_label": "refuted"
+}

@@ -1,0 +1,17 @@
+argument_scoring:
+  relevance: 0.25
+  reliability: 0.25
+  corroboration: 0.20
+  provenance_strength: 0.20
+  specificity: 0.10
+  invalid_argument_multiplier: 0.25
+
+decision_thresholds:
+  supported: 0.25
+  refuted: -0.25
+  high_confidence: 0.75
+  medium_confidence: 0.45
+
+aggregation:
+  authenticity_weight: 1.5
+  major_factual_clash_penalty: 0.20

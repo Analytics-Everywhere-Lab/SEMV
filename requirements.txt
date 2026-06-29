@@ -1,0 +1,5 @@
+pydantic>=2.7,<3
+PyYAML>=6.0.1,<7
+requests>=2.31,<3
+Pillow>=10.0,<12
+pytest>=8.0,<9

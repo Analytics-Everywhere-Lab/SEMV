@@ -1,0 +1,1 @@
+"""Raw multimedia processing adapters."""
