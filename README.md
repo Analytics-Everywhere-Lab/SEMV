@@ -114,9 +114,9 @@ Convert a native case to canonical format:
 
 ```bash
 python scripts/convert_case.py \
-  --case-path data/raw/mv2026/example_case.json \
+  --case-path data/raw/mv2026/training/ID333/ID333 \
   --adapter auto \
-  --split validation \
+  --split training \
   --canonical-root data/canonical
 ```
 
@@ -126,7 +126,7 @@ Run a canonical case bundle:
 
 ```bash
 python scripts/run_case.py \
-  --case-bundle data/canonical/example_case.json \
+  --case-bundle data/canonical/mv2026/ID333/case_bundle.json \
   --mode inference_only
 ```
 
@@ -134,8 +134,9 @@ Run a native dataset case through an adapter:
 
 ```bash
 python scripts/run_case.py \
-  --case-path data/raw/mv2026/example_case.json \
+  --case-path data/raw/mv2026/training/ID333/ID333 \
   --adapter auto \
+  --split training \
   --mode inference_only
 ```
 
@@ -198,9 +199,10 @@ Static dataset evaluators can be run directly:
 
 ```bash
 python scripts/evaluate_mv2026.py \
-  --raw-root data/raw/mv2026 \
+  --raw-root data/raw/mv2026/training \
   --output-dir data/outputs/evaluation/mv2026_static \
-  --split validation
+  --split training \
+  --case-id ID333
 
 python scripts/evaluate_cosmos.py \
   --cosmos-metadata data/raw/cosmos/test.jsonl \

@@ -21,7 +21,7 @@ def main() -> None:
     parser.add_argument("--canonical-root", default="data/canonical")
     parser.add_argument("--copy-media", default="false")
     args = parser.parse_args()
-    del args.copy_media
+    
     case_path = Path(args.case_path)
     if not case_path.is_absolute():
         case_path = project_root() / case_path

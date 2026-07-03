@@ -28,13 +28,22 @@ def evaluate_mv2026(
     protocol: str = "static",
     split: str | None = "validation",
     llm_client=None,
+    case_id: str | None = None,
+    limit: int | None = None,
 ) -> dict:
     root = _resolve(raw_root)
     if not root.exists():
         raise FileNotFoundError(f"MV2026 raw root not found: {root}")
-    case_dirs = [path for path in sorted(root.iterdir()) if path.is_dir() and (path / "input").exists()]
+    case_dirs = _discover_case_dirs(root)
+    if case_id:
+        case_dirs = [path for path in case_dirs if path.name == case_id]
+    if limit is not None:
+        case_dirs = case_dirs[:limit]
     if not case_dirs:
-        raise ValueError(f"No MV2026 cases found under {root}; expected IDxxx/input/*.json")
+        suffix = f" matching case_id={case_id!r}" if case_id else ""
+        raise ValueError(
+            f"No MV2026 cases found under {root}{suffix}; expected case folders containing input/*.json"
+        )
 
     adapter = MV2026Adapter()
     predictions = []
@@ -95,6 +104,18 @@ def evaluate_mv2026(
     out = _resolve(output_dir)
     write_records(out, predictions, gold_records, per_case, aggregate, calibration or {}, mem)
     return aggregate
+
+
+def _discover_case_dirs(root: Path) -> list[Path]:
+    if (root / "input").is_dir() and any((root / "input").glob("*.json")):
+        return [root]
+
+    case_dirs = {
+        input_dir.parent
+        for input_dir in root.rglob("input")
+        if input_dir.is_dir() and any(input_dir.glob("*.json"))
+    }
+    return sorted(case_dirs)
 
 
 def _gold_from_bundle(bundle) -> GoldRecord:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any, Protocol
 
@@ -84,3 +85,57 @@ class OllamaLLMClient:
             if start != -1 and end != -1 and end > start:
                 return json.loads(response_text[start : end + 1])
             raise
+
+
+class LoggingLLMClient:
+    """LLM client wrapper that logs raw model outputs as they are produced."""
+
+    def __init__(self, wrapped: LLMClient, logger_name: str = "llm") -> None:
+        self.wrapped = wrapped
+        self.logger = logging.getLogger(logger_name)
+        self.call_count = 0
+
+    def generate(self, prompt: str, system: str | None = None, **kwargs: Any) -> str:
+        self.call_count += 1
+        call_id = self.call_count
+        self.logger.info(
+            "LLM call %s started (prompt_chars=%s, system_chars=%s)",
+            call_id,
+            len(prompt),
+            len(system or ""),
+        )
+        response_text = self.wrapped.generate(prompt, system=system, **kwargs)
+        self._log_response(call_id, response_text)
+        return response_text
+
+    def generate_text(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> str:
+        return self.generate(user_prompt, system=system_prompt, **kwargs)
+
+    def generate_json(
+        self,
+        prompt: str,
+        system: str | None = None,
+        schema: dict | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        if schema:
+            kwargs.setdefault("format", "json")
+            if system is not None:
+                prompt, system = system, prompt
+        response_text = self.generate(prompt, system=system, **kwargs)
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            start = response_text.find("{")
+            end = response_text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                return json.loads(response_text[start : end + 1])
+            raise
+
+    def _log_response(self, call_id: int, response_text: str) -> None:
+        self.logger.info(
+            "LLM call %s completed (response_chars=%s)\n%s",
+            call_id,
+            len(response_text),
+            response_text,
+        )

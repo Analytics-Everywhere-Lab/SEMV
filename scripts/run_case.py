@@ -24,12 +24,12 @@ def main() -> None:
     parser.add_argument("--case-path", default=None, help="Native dataset case path.")
     parser.add_argument("--adapter", default="auto")
     parser.add_argument("--canonical-root", default="data/canonical")
+    parser.add_argument("--split", default=None, help="Dataset split name for native case paths, e.g. training.")
     parser.add_argument("--mode", choices=["inference_only", "self_evolving", "test", "bootstrap_memory"], default="inference_only")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--ground-truth-label", default=None)
     parser.add_argument("--human-feedback-json", default=None)
     args = parser.parse_args()
-    del args.human_feedback_json
 
     if args.case_bundle:
         path = _resolve(args.case_bundle)
@@ -38,7 +38,7 @@ def main() -> None:
     elif args.case_path:
         native = _resolve(args.case_path)
         adapter = default_registry().get_adapter(native, args.adapter)
-        bundle = adapter.load(native)
+        bundle = adapter.load(native, split=args.split)
         write_canonical_bundle(bundle, args.canonical_root)
         report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=native)
     elif args.case:

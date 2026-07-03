@@ -25,3 +25,20 @@ def load_env_file(path: str | Path | None = None, override: bool = False) -> dic
         if override or key not in os.environ:
             os.environ[key] = value
     return loaded
+
+
+def get_int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def get_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}

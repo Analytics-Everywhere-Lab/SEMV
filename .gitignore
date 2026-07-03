@@ -1,0 +1,12 @@
+data/raw/mv2026/training/*
+data/raw/cosmos/*
+.venv
+.pytest_cache
+.env
+__pycache__
+data/evidence_cache_disabled
+data/evidence_cache
+data/outputs
+.ipynb_checkpoints
+data/canonical
+.ignore

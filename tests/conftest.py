@@ -40,6 +40,13 @@ class FakeLLMClient:
                 "preferred_sources": ["cached fact checks"],
                 "uncertainty_checks": ["Check provenance"],
             }
+        if "Verify whether each argument is grounded" in prompt:
+            return {
+                "results": [
+                    {"argument_id": "a1", "valid": True, "notes": "Batch grounded 1."},
+                    {"argument_id": "a2", "valid": False, "notes": "Batch grounded 2."},
+                ]
+            }
         if "Check whether the argument is grounded" in prompt:
             return {"valid": True, "notes": "Grounded in linked evidence."}
         if "Verify whether this memory lesson" in prompt:

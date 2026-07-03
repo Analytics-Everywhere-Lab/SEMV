@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.evaluation.mv2026_evaluator import evaluate_mv2026
+from src.utils.llm_client import LoggingLLMClient, OllamaLLMClient
 
 
 def main() -> None:
@@ -19,9 +21,35 @@ def main() -> None:
     parser.add_argument("--config", default="configs/evaluation.yaml")
     parser.add_argument("--protocol", default="static")
     parser.add_argument("--split", default="validation")
+    parser.add_argument("--case-id", default=None, help="Optional MV2026 case id, e.g. ID333.")
+    parser.add_argument("--limit", type=int, default=None, help="Optional maximum number of cases to run.")
     args = parser.parse_args()
-    del args.canonical_root, args.config
-    result = evaluate_mv2026(args.raw_root, args.output_dir, args.protocol, args.split)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logger = logging.getLogger("evaluation.mv2026")
+    logger.info(
+        "Starting MV2026 evaluation: raw_root=%s output_dir=%s protocol=%s split=%s case_id=%s limit=%s",
+        args.raw_root,
+        args.output_dir,
+        args.protocol,
+        args.split,
+        args.case_id,
+        args.limit,
+    )
+    llm_client = LoggingLLMClient(OllamaLLMClient(), logger_name="llm.output")
+
+    result = evaluate_mv2026(
+        args.raw_root,
+        args.output_dir,
+        args.protocol,
+        args.split,
+        case_id=args.case_id,
+        limit=args.limit,
+        llm_client=llm_client,
+    )
     print(result)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Literal
 
@@ -30,10 +31,12 @@ from src.schemas.case_bundle_schema import (
     multimedia_case_to_case_bundle,
 )
 from src.schemas.case_schema import MultimediaCase
-from src.schemas.claim_schema import SubClaim
-from src.schemas.evidence_schema import EvidenceItem
+from src.schemas.claim_schema import ResearchPlan, SubClaim
+from src.schemas.evidence_schema import EvidenceGraph, EvidenceItem
 from src.schemas.memory_schema import MemoryRecord
+from src.schemas.qbaf_schema import QBAFGraph
 from src.schemas.report_schema import SubClaimReport, VerificationReport
+from src.utils.env_loader import get_bool_env, get_int_env
 from src.utils.io import project_root, write_json
 from src.utils.llm_client import LLMClient, OllamaLLMClient
 
@@ -99,14 +102,14 @@ def run_case_bundle(
     all_evidence = list(raw_evidence)
     if bundle.run_config.allow_web_search or bundle.run_config.allow_reverse_search:
         researcher = DeepResearcher(llm_client=shared_llm_client)
-        for claim in claims:
-            all_evidence.extend(
-                researcher.research(
-                    claim=claim,
-                    plan=research_plans[claim.claim_id],
-                    existing_evidence=all_evidence,
-                )
-            )
+        existing_evidence_snapshot = list(all_evidence)
+        research_results = _research_claims_parallel(
+            researcher=researcher,
+            claims=claims,
+            research_plans=research_plans,
+            existing_evidence=existing_evidence_snapshot,
+        )
+        all_evidence = _merge_dedup_evidence(all_evidence, research_results)
 
     normalized_evidence = EvidenceNormalizer().normalize(all_evidence)
     evidence_graph = EvidenceGraphBuilder().build(normalized_evidence, claims)
@@ -123,54 +126,25 @@ def run_case_bundle(
     clash_resolver = ClashResolver(llm_client=shared_llm_client)
     decision_mapper = DecisionMapper()
 
-    for claim in claims:
-        claim_evidence = evidence_ranker.select_for_claim(
-            claim=claim,
-            evidence=normalized_evidence,
-            evidence_graph=evidence_graph,
-            top_k=10,
-        )
-        arguments = argument_generator.generate(
-            claim=claim,
-            evidence=claim_evidence,
-            evidence_graph=evidence_graph,
-            memory_items=memory_by_claim.get(claim.claim_id, []),
-        )
-        verified_arguments = argument_verifier.verify_all(
-            claim=claim,
-            arguments=arguments,
-            evidence=claim_evidence,
-            bundle=bundle,
-        )
-        scored_arguments = argument_scorer.score_all(
-            claim=claim,
-            arguments=verified_arguments,
-            evidence=claim_evidence,
-            evidence_graph=evidence_graph,
-            bundle=bundle,
-        )
-        graph = propagator.propagate(graph_builder.build(claim=claim, arguments=scored_arguments))
-        if clash_resolver.should_resolve(graph, scored_arguments):
-            scored_arguments = clash_resolver.resolve(
-                claim=claim,
-                graph=graph,
-                arguments=scored_arguments,
-            )
-            scored_arguments = argument_scorer.score_all(
-                claim=claim,
-                arguments=scored_arguments,
-                evidence=claim_evidence,
-                evidence_graph=evidence_graph,
-                bundle=bundle,
-            )
-            graph = propagator.propagate(
-                graph_builder.build(claim=claim, arguments=scored_arguments)
-            )
+    claim_results = _process_claims_parallel(
+        claims=claims,
+        normalized_evidence=normalized_evidence,
+        evidence_graph=evidence_graph,
+        memory_by_claim=memory_by_claim,
+        bundle=bundle,
+        evidence_ranker=evidence_ranker,
+        argument_generator=argument_generator,
+        argument_verifier=argument_verifier,
+        argument_scorer=argument_scorer,
+        graph_builder=graph_builder,
+        propagator=propagator,
+        clash_resolver=clash_resolver,
+        decision_mapper=decision_mapper,
+    )
+    for scored_arguments, graph, subclaim_report in claim_results:
         all_arguments.extend(scored_arguments)
         qbaf_graphs.append(graph)
-        subclaim_reports.append(
-            decision_mapper.to_subclaim_report(claim, graph, scored_arguments)
-        )
+        subclaim_reports.append(subclaim_report)
 
     final_status, final_confidence = FinalDecisionAggregator().aggregate(
         subclaim_reports,
@@ -252,6 +226,209 @@ def run_case(
         llm_client=llm_client,
         case_path=case_path,
     )
+
+
+def _process_claims_parallel(
+    claims: list[SubClaim],
+    normalized_evidence: list[EvidenceItem],
+    evidence_graph: EvidenceGraph,
+    memory_by_claim: dict[str, list[MemoryRecord]],
+    bundle: CaseBundle,
+    evidence_ranker: EvidenceRanker,
+    argument_generator: ArgumentGenerator,
+    argument_verifier: ArgumentVerifier,
+    argument_scorer: ArgumentScorer,
+    graph_builder: QBAFGraphBuilder,
+    propagator: QBAFPropagator,
+    clash_resolver: ClashResolver,
+    decision_mapper: DecisionMapper,
+) -> list[tuple[list[Argument], QBAFGraph, SubClaimReport]]:
+    max_workers = _max_parallel_claim_workers(len(claims))
+    if max_workers <= 1:
+        return [
+            _process_claim(
+                claim=claim,
+                normalized_evidence=normalized_evidence,
+                evidence_graph=evidence_graph,
+                memory_by_claim=memory_by_claim,
+                bundle=bundle,
+                evidence_ranker=evidence_ranker,
+                argument_generator=argument_generator,
+                argument_verifier=argument_verifier,
+                argument_scorer=argument_scorer,
+                graph_builder=graph_builder,
+                propagator=propagator,
+                clash_resolver=clash_resolver,
+                decision_mapper=decision_mapper,
+            )
+            for claim in claims
+        ]
+
+    results_by_claim: dict[str, tuple[list[Argument], QBAFGraph, SubClaimReport]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _process_claim,
+                claim=claim,
+                normalized_evidence=normalized_evidence,
+                evidence_graph=evidence_graph,
+                memory_by_claim=memory_by_claim,
+                bundle=bundle,
+                evidence_ranker=evidence_ranker,
+                argument_generator=argument_generator,
+                argument_verifier=argument_verifier,
+                argument_scorer=argument_scorer,
+                graph_builder=graph_builder,
+                propagator=propagator,
+                clash_resolver=clash_resolver,
+                decision_mapper=decision_mapper,
+            ): claim
+            for claim in claims
+        }
+        for future in as_completed(futures):
+            claim = futures[future]
+            results_by_claim[claim.claim_id] = future.result()
+
+    return [results_by_claim[claim.claim_id] for claim in claims]
+
+
+def _process_claim(
+    claim: SubClaim,
+    normalized_evidence: list[EvidenceItem],
+    evidence_graph: EvidenceGraph,
+    memory_by_claim: dict[str, list[MemoryRecord]],
+    bundle: CaseBundle,
+    evidence_ranker: EvidenceRanker,
+    argument_generator: ArgumentGenerator,
+    argument_verifier: ArgumentVerifier,
+    argument_scorer: ArgumentScorer,
+    graph_builder: QBAFGraphBuilder,
+    propagator: QBAFPropagator,
+    clash_resolver: ClashResolver,
+    decision_mapper: DecisionMapper,
+) -> tuple[list[Argument], QBAFGraph, SubClaimReport]:
+    claim_evidence = evidence_ranker.select_for_claim(
+        claim=claim,
+        evidence=normalized_evidence,
+        evidence_graph=evidence_graph,
+        top_k=10,
+    )
+    arguments = argument_generator.generate(
+        claim=claim,
+        evidence=claim_evidence,
+        evidence_graph=evidence_graph,
+        memory_items=memory_by_claim.get(claim.claim_id, []),
+    )
+    verified_arguments = argument_verifier.verify_all(
+        claim=claim,
+        arguments=arguments,
+        evidence=claim_evidence,
+        bundle=bundle,
+    )
+    scored_arguments = argument_scorer.score_all(
+        claim=claim,
+        arguments=verified_arguments,
+        evidence=claim_evidence,
+        evidence_graph=evidence_graph,
+        bundle=bundle,
+    )
+    graph = propagator.propagate(graph_builder.build(claim=claim, arguments=scored_arguments))
+    if clash_resolver.should_resolve(graph, scored_arguments):
+        scored_arguments = clash_resolver.resolve(
+            claim=claim,
+            graph=graph,
+            arguments=scored_arguments,
+        )
+        scored_arguments = argument_scorer.score_all(
+            claim=claim,
+            arguments=scored_arguments,
+            evidence=claim_evidence,
+            evidence_graph=evidence_graph,
+            bundle=bundle,
+        )
+        graph = propagator.propagate(
+            graph_builder.build(claim=claim, arguments=scored_arguments)
+        )
+
+    subclaim_report = decision_mapper.to_subclaim_report(claim, graph, scored_arguments)
+    return scored_arguments, graph, subclaim_report
+
+
+def _max_parallel_claim_workers(claim_count: int) -> int:
+    if claim_count <= 1 or not get_bool_env("SEMV_PARALLEL_CLAIMS", True):
+        return 1
+    max_workers = get_int_env("SEMV_MAX_WORKERS", 2)
+    return max(1, min(claim_count, max_workers))
+
+
+def _research_claims_parallel(
+    researcher: DeepResearcher,
+    claims: list[SubClaim],
+    research_plans: dict[str, ResearchPlan],
+    existing_evidence: list[EvidenceItem],
+) -> list[EvidenceItem]:
+    max_workers = _max_parallel_research_workers(len(claims))
+    if max_workers <= 1:
+        results: list[EvidenceItem] = []
+        for claim in claims:
+            results.extend(
+                researcher.research(
+                    claim=claim,
+                    plan=research_plans[claim.claim_id],
+                    existing_evidence=existing_evidence,
+                )
+            )
+        return results
+
+    results_by_claim: dict[str, list[EvidenceItem]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                researcher.research,
+                claim=claim,
+                plan=research_plans[claim.claim_id],
+                existing_evidence=existing_evidence,
+            ): claim
+            for claim in claims
+        }
+        for future in as_completed(futures):
+            claim = futures[future]
+            results_by_claim[claim.claim_id] = future.result()
+
+    results = []
+    for claim in claims:
+        results.extend(results_by_claim.get(claim.claim_id, []))
+    return results
+
+
+def _max_parallel_research_workers(claim_count: int) -> int:
+    if claim_count <= 1 or not get_bool_env("SEMV_PARALLEL_DEEP_RESEARCH", True):
+        return 1
+    max_workers = get_int_env("SEMV_MAX_WORKERS", 2)
+    return max(1, min(claim_count, max_workers))
+
+
+def _merge_dedup_evidence(
+    existing_evidence: list[EvidenceItem],
+    research_results: list[EvidenceItem],
+) -> list[EvidenceItem]:
+    deduped: dict[str, EvidenceItem] = {}
+    for item in [*existing_evidence, *research_results]:
+        if item.evidence_id not in deduped:
+            deduped[item.evidence_id] = item
+            continue
+
+        existing = deduped[item.evidence_id]
+        deduped[item.evidence_id] = existing.model_copy(
+            update={
+                "reliability": max(existing.reliability, item.reliability),
+                "relevance": max(existing.relevance, item.relevance),
+                "uncertainty_flags": sorted(
+                    set(existing.uncertainty_flags + item.uncertainty_flags)
+                ),
+            }
+        )
+    return list(deduped.values())
 
 
 def _claims_from_bundle(bundle: CaseBundle) -> list[SubClaim]:
