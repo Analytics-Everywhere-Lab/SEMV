@@ -74,7 +74,7 @@ class MarkdownRenderer:
         else:
             lines.append("- No major uncertainty flags recorded.")
 
-        lines.extend(["", "## Contestation Log", "- No human contestation recorded."])
+        lines.extend(_render_human_contestation(report))
 
         lines.extend(["", "## Reflection and Memory Update Candidate"])
         if report.reflection_logs:
@@ -93,6 +93,46 @@ class MarkdownRenderer:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(self.render(report), encoding="utf-8")
+
+
+def _render_human_contestation(report: VerificationReport) -> list[str]:
+    lines = ["", "## Human Contestation and Adaptive Revision"]
+    if not report.human_review_applied:
+        lines.append("Human review applied: no.")
+        return lines
+
+    lines.append("Human review applied: yes")
+    lines.extend(["", "### Human Actions", "| Action | Argument | Subclaim | Reason |", "|---|---|---|---|"])
+    batch = report.human_review_batch
+    if batch:
+        for item in batch.contestations:
+            argument = item.target_argument_id or ""
+            subclaim = item.added_subclaim_id or ""
+            reason = (item.reason or "").replace("|", "\\|")
+            lines.append(f"| {item.action} | {argument} | {subclaim} | {reason} |")
+
+    plan = report.revision_plan
+    lines.extend(["", "### Revision Plan"])
+    if plan:
+        lines.extend([
+            f"- Rerun from step: {plan.rerun_from_step}",
+            f"- Revision target: {plan.revision_target}",
+            f"- Rationale: {plan.rationale}",
+            "- Affected arguments: " + (", ".join(plan.affected_argument_ids) or "none"),
+            "- Affected evidence: " + (", ".join(plan.affected_evidence_ids) or "none"),
+        ])
+    else:
+        lines.append("- Rerun from step: none")
+
+    summary = report.contestation_summary
+    lines.extend(["", "### Effect on Final Decision"])
+    lines.extend([
+        "- Original final decision: " + str(summary.get("original_final_status", "unknown")),
+        "- Revised final decision: " + str(summary.get("revised_final_status", report.final_status)),
+        "- Original confidence: " + str(summary.get("original_confidence", "unknown")),
+        "- Revised confidence: " + str(summary.get("revised_confidence", report.final_confidence)),
+    ])
+    return lines
 
 
 def _render_subclaim(subclaim) -> list[str]:

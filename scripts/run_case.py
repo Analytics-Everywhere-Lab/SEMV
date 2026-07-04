@@ -29,18 +29,22 @@ def main() -> None:
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--ground-truth-label", default=None)
     parser.add_argument("--human-feedback-json", default=None)
+    parser.add_argument("--human_review_path", default=None)
+    parser.add_argument("--enable_adaptive_revision", default="false")
+    parser.add_argument("--save_case_trace", default="true")
+    parser.add_argument("--exclude_rejected_arguments", default="true")
     args = parser.parse_args()
 
     if args.case_bundle:
         path = _resolve(args.case_bundle)
         bundle = load_case_bundle(path)
-        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=path)
+        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=path, human_review_path=args.human_review_path, enable_adaptive_revision=_parse_bool(args.enable_adaptive_revision), save_case_trace=_parse_bool(args.save_case_trace), exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments))
     elif args.case_path:
         native = _resolve(args.case_path)
         adapter = default_registry().get_adapter(native, args.adapter)
         bundle = adapter.load(native, split=args.split)
         write_canonical_bundle(bundle, args.canonical_root)
-        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=native)
+        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=native, human_review_path=args.human_review_path, enable_adaptive_revision=_parse_bool(args.enable_adaptive_revision), save_case_trace=_parse_bool(args.save_case_trace), exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments))
     elif args.case:
         path = _resolve(args.case)
         case = MultimediaCase.model_validate(read_json(path))
@@ -57,6 +61,12 @@ def main() -> None:
     output_dir = project_root() / "data" / "outputs" / "cases" / report.case_id
     print(f"Wrote {output_dir / 'report.json'}")
     print(f"Wrote {output_dir / 'report.md'}")
+
+
+def _parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    return value.lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _resolve(path: str) -> Path:

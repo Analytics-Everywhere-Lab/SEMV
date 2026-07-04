@@ -2,10 +2,26 @@ from __future__ import annotations
 
 from src.schemas.argument_schema import Argument
 from src.schemas.claim_schema import SubClaim
+from src.schemas.contestation_schema import ArgumentProvenance
 from src.schemas.evidence_schema import EvidenceGraph, EvidenceItem
 from src.schemas.memory_schema import MemoryRecord
 from src.utils.hashing import stable_hash_text
 from src.utils.llm_client import LLMClient
+
+
+def _argument_provenance(claim: SubClaim, evidence_ids: list[str]) -> ArgumentProvenance:
+    return ArgumentProvenance(
+        source_step="argument_construction",
+        subclaim_id=claim.claim_id,
+        evidence_ids=list(evidence_ids),
+        retrieval_query_ids=list(claim.search_queries),
+        upstream_steps=[
+            "claim_decomposition",
+            "evidence_retrieval",
+            "evidence_validation",
+            "argument_construction",
+        ],
+    )
 
 
 class ArgumentGenerator:
@@ -48,6 +64,7 @@ class ArgumentGenerator:
                         title=item.get("title") or f"{stance.title()} argument",
                         text=item.get("text") or "No argument text returned.",
                         evidence_ids=evidence_ids,
+                        provenance=_argument_provenance(claim, evidence_ids),
                     )
                 )
             if arguments:
@@ -68,6 +85,7 @@ class ArgumentGenerator:
                     title=f"{stance.title()} from {item.title or item.source}",
                     text=f"{item.content}",
                     evidence_ids=[item.evidence_id],
+                    provenance=_argument_provenance(claim, [item.evidence_id]),
                     relevance=item.relevance,
                     reliability=item.reliability,
                     corroboration=0.55,

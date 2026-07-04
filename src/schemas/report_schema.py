@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.schemas.argument_schema import Argument
+from src.schemas.contestation_schema import HumanReviewBatch, RevisionPlan
 from src.schemas.evidence_schema import EvidenceGraph, EvidenceItem
 from src.schemas.memory_schema import MemoryRecord, MemoryUpdateCandidate
 
@@ -47,4 +48,8 @@ class VerificationReport(BaseModel):
     reflection_logs: list[ReflectionLog] = Field(default_factory=list)
     memory_update_candidates: list[MemoryUpdateCandidate] = Field(default_factory=list)
     memory_updates_applied: list[MemoryRecord] = Field(default_factory=list)
+    human_review_applied: bool = False
+    human_review_batch: HumanReviewBatch | None = None
+    revision_plan: RevisionPlan | None = None
+    contestation_summary: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)

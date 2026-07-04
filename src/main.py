@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import argparse
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from src.aggregation.final_decision_aggregator import FinalDecisionAggregator
+from src.contestation.contestation_applier import apply_human_contestations, contestation_summary
+from src.contestation.revision_router import route_revision
 from src.argumentation.argument_generator import ArgumentGenerator
 from src.argumentation.argument_scorer import ArgumentScorer
 from src.argumentation.argument_verifier import ArgumentVerifier
@@ -25,6 +29,7 @@ from src.reporting.report_generator import ReportGenerator
 from src.retrieval.deep_researcher import DeepResearcher
 from src.retrieval.evidence_ranker import EvidenceRanker
 from src.schemas.argument_schema import Argument
+from src.schemas.case_trace_schema import CaseTrace
 from src.schemas.case_bundle_schema import (
     CaseBundle,
     case_bundle_to_multimedia_case,
@@ -32,12 +37,13 @@ from src.schemas.case_bundle_schema import (
 )
 from src.schemas.case_schema import MultimediaCase
 from src.schemas.claim_schema import ResearchPlan, SubClaim
+from src.schemas.contestation_schema import HumanReviewBatch, RevisionTarget
 from src.schemas.evidence_schema import EvidenceGraph, EvidenceItem
 from src.schemas.memory_schema import MemoryRecord
 from src.schemas.qbaf_schema import QBAFGraph
 from src.schemas.report_schema import SubClaimReport, VerificationReport
 from src.utils.env_loader import get_bool_env, get_int_env
-from src.utils.io import project_root, write_json
+from src.utils.io import project_root, read_json, write_json
 from src.utils.llm_client import LLMClient, OllamaLLMClient
 
 
@@ -51,6 +57,11 @@ def run_case_bundle(
     config_path: str = "configs/default.yaml",
     llm_client: LLMClient | None = None,
     case_path: Path | None = None,
+    human_review_path: str | Path | None = None,
+    human_review_batch: HumanReviewBatch | None = None,
+    enable_adaptive_revision: bool = False,
+    save_case_trace: bool = True,
+    exclude_rejected_arguments: bool = True,
 ) -> VerificationReport:
     del config_path
     if mode not in {"inference_only", "self_evolving", "test", "bootstrap_memory"}:
@@ -140,6 +151,7 @@ def run_case_bundle(
         propagator=propagator,
         clash_resolver=clash_resolver,
         decision_mapper=decision_mapper,
+        exclude_rejected_arguments=exclude_rejected_arguments,
     )
     for scored_arguments, graph, subclaim_report in claim_results:
         all_arguments.extend(scored_arguments)
@@ -172,13 +184,86 @@ def run_case_bundle(
         }
     )
 
+    review_batch = _load_human_review_batch(human_review_path, human_review_batch)
+    report_before_contestation: VerificationReport | None = None
+    contestation_diff: dict[str, Any] | None = None
+    revision_plan = None
+    if review_batch is not None:
+        report_before_contestation = report
+        original_arguments = list(all_arguments)
+        pre_trace = _build_case_trace(
+            bundle=bundle,
+            claims=claims,
+            evidence_items=all_evidence,
+            validated_evidence_items=normalized_evidence,
+            arguments=all_arguments,
+            qbaf_graphs=qbaf_graphs,
+            report=report,
+            raw_evidence=raw_evidence,
+        )
+        revision_plan = route_revision(
+            review_batch=review_batch,
+            current_arguments=all_arguments,
+            case_trace=pre_trace,
+        )
+        reviewed_arguments = apply_human_contestations(all_arguments, review_batch)
+        report, qbaf_graphs, all_arguments = _rerun_qbaf_and_report(
+            legacy_case=legacy_case,
+            bundle=bundle,
+            claims=claims,
+            arguments=reviewed_arguments,
+            evidence=normalized_evidence,
+            evidence_graph=evidence_graph,
+            memory_used=memory_used,
+            llm_client=shared_llm_client,
+            exclude_rejected_arguments=exclude_rejected_arguments,
+        )
+        contestation_diff = _contestation_diff(
+            original_report=report_before_contestation,
+            revised_report=report,
+            original_arguments=original_arguments,
+            revised_arguments=all_arguments,
+            revision_plan=revision_plan,
+        )
+        summary = contestation_summary(original_arguments, all_arguments, review_batch)
+        summary.update(contestation_diff)
+        report = report.model_copy(
+            update={
+                "human_review_applied": True,
+                "human_review_batch": review_batch,
+                "revision_plan": revision_plan,
+                "contestation_summary": summary,
+                "metadata": {
+                    **report.metadata,
+                    "dataset": bundle.dataset.model_dump(mode="json"),
+                    "task": bundle.task.model_dump(mode="json"),
+                    "input": bundle.input.model_dump(mode="json"),
+                    "gold_visibility": bundle.gold.gold_visibility,
+                    "enable_adaptive_revision": enable_adaptive_revision,
+                    "human_contestation_changed_final_decision": contestation_diff[
+                        "human_contestation_changed_final_decision"
+                    ],
+                },
+            }
+        )
+
     if mode in {"self_evolving", "bootstrap_memory"} and (
         bundle.gold.gold_final_label or bundle.gold.gold_report_available
     ):
         reflection, candidates = ReflectionAgent(llm_client=shared_llm_client).reflect(
             report=report,
             ground_truth_label=bundle.gold.gold_final_label,
-            human_feedback=None,
+            human_feedback=(
+                {
+                    "human_review_batch": review_batch.model_dump(mode="json"),
+                    "revision_plan": revision_plan.model_dump(mode="json") if revision_plan else None,
+                    "original_report": report_before_contestation.model_dump(mode="json") if report_before_contestation else None,
+                    "revised_report": report.model_dump(mode="json"),
+                    "contestation_diff": contestation_diff,
+                }
+                if review_batch is not None
+                else None
+            ),
             update_memory=bundle.run_config.allow_memory_update,
         )
         report.reflection_logs = [reflection]
@@ -194,6 +279,11 @@ def run_case_bundle(
         qbaf_graphs=qbaf_graphs,
         memory_by_claim=memory_by_claim,
         report=report,
+        save_case_trace=save_case_trace,
+        review_batch=review_batch,
+        revision_plan=revision_plan,
+        report_before_contestation=report_before_contestation,
+        contestation_diff=contestation_diff,
     )
     return report
 
@@ -228,6 +318,248 @@ def run_case(
     )
 
 
+
+def run_from_step(
+    bundle: CaseBundle,
+    step_name: RevisionTarget,
+    previous_state: CaseTrace | None = None,
+    human_review_batch: HumanReviewBatch | None = None,
+    llm_client: LLMClient | None = None,
+    case_path: Path | None = None,
+    exclude_rejected_arguments: bool = True,
+) -> VerificationReport:
+    if previous_state is None or not previous_state.arguments:
+        return run_case_bundle(
+            bundle=bundle,
+            mode="inference_only",
+            llm_client=llm_client,
+            case_path=case_path,
+            human_review_batch=human_review_batch,
+            enable_adaptive_revision=human_review_batch is not None,
+            exclude_rejected_arguments=exclude_rejected_arguments,
+        )
+
+    claims = _coerce_subclaims(previous_state.subclaims)
+    evidence = _coerce_evidence(
+        previous_state.validated_evidence_items or previous_state.evidence_items
+    )
+    original_arguments = _coerce_arguments(previous_state.arguments)
+    revision_plan = None
+    arguments = original_arguments
+    if human_review_batch is not None:
+        revision_plan = route_revision(
+            review_batch=human_review_batch,
+            current_arguments=original_arguments,
+            case_trace=previous_state,
+        )
+        arguments = apply_human_contestations(original_arguments, human_review_batch)
+
+    evidence_graph = EvidenceGraphBuilder().build(evidence, claims)
+    legacy_case = case_bundle_to_multimedia_case(bundle)
+    memory_used: list[MemoryRecord] = []
+    report, _, reviewed_arguments = _rerun_qbaf_and_report(
+        legacy_case=legacy_case,
+        bundle=bundle,
+        claims=claims,
+        arguments=arguments,
+        evidence=evidence,
+        evidence_graph=evidence_graph,
+        memory_used=memory_used,
+        llm_client=llm_client or OllamaLLMClient(),
+        exclude_rejected_arguments=exclude_rejected_arguments,
+    )
+    trace = _build_case_trace(
+        bundle=bundle,
+        claims=claims,
+        evidence_items=evidence,
+        validated_evidence_items=evidence,
+        arguments=reviewed_arguments,
+        qbaf_graphs=[],
+        report=report,
+        raw_evidence=[],
+    )
+    trace.metadata["rerun_from_step"] = step_name
+    report.metadata["case_trace"] = trace.model_dump(mode="json")
+    if human_review_batch is not None:
+        diff = _contestation_diff(
+            original_report=VerificationReport(
+                case_id=bundle.case_id,
+                final_status=previous_state.final_decision.get("final_status", "unknown"),
+                final_confidence=previous_state.final_decision.get("final_confidence", 0.0),
+            ),
+            revised_report=report,
+            original_arguments=original_arguments,
+            revised_arguments=reviewed_arguments,
+            revision_plan=revision_plan,
+        )
+        summary = contestation_summary(original_arguments, reviewed_arguments, human_review_batch)
+        summary.update(diff)
+        report = report.model_copy(
+            update={
+                "human_review_applied": True,
+                "human_review_batch": human_review_batch,
+                "revision_plan": revision_plan,
+                "contestation_summary": summary,
+                "metadata": {**report.metadata, "case_trace": trace.model_dump(mode="json")},
+            }
+        )
+    return report
+
+
+def _load_human_review_batch(
+    human_review_path: str | Path | None,
+    human_review_batch: HumanReviewBatch | None,
+) -> HumanReviewBatch | None:
+    if human_review_batch is not None:
+        return human_review_batch
+    if human_review_path is None:
+        return None
+    return HumanReviewBatch.model_validate(read_json(human_review_path))
+
+
+def _build_case_trace(
+    bundle: CaseBundle,
+    claims: list[SubClaim],
+    evidence_items: list[EvidenceItem],
+    validated_evidence_items: list[EvidenceItem],
+    arguments: list[Argument],
+    qbaf_graphs: list[QBAFGraph],
+    report: VerificationReport,
+    raw_evidence: list[EvidenceItem] | None = None,
+) -> CaseTrace:
+    retrieval_queries = [
+        {"claim_id": claim.claim_id, "query": query}
+        for claim in claims
+        for query in claim.search_queries
+    ]
+    return CaseTrace(
+        case_id=bundle.case_id,
+        input_bundle=bundle.model_dump(mode="json"),
+        subclaims=claims,
+        retrieval_queries=retrieval_queries,
+        evidence_items=evidence_items,
+        validated_evidence_items=validated_evidence_items,
+        arguments=arguments,
+        qbaf_state={"graphs": qbaf_graphs},
+        final_decision={
+            "final_status": report.final_status,
+            "final_confidence": report.final_confidence,
+        },
+        report=report.model_dump(mode="json"),
+        metadata={"raw_evidence": raw_evidence or []},
+    )
+
+
+def _rerun_qbaf_and_report(
+    legacy_case: MultimediaCase,
+    bundle: CaseBundle,
+    claims: list[SubClaim],
+    arguments: list[Argument],
+    evidence: list[EvidenceItem],
+    evidence_graph: EvidenceGraph,
+    memory_used: list[MemoryRecord],
+    llm_client: LLMClient,
+    exclude_rejected_arguments: bool,
+) -> tuple[VerificationReport, list[QBAFGraph], list[Argument]]:
+    graph_builder = QBAFGraphBuilder()
+    propagator = QBAFPropagator()
+    decision_mapper = DecisionMapper()
+    qbaf_graphs: list[QBAFGraph] = []
+    subclaim_reports: list[SubClaimReport] = []
+
+    arguments_by_claim: dict[str, list[Argument]] = {}
+    for argument in arguments:
+        arguments_by_claim.setdefault(argument.claim_id, []).append(argument)
+
+    for claim in claims:
+        claim_arguments = arguments_by_claim.get(claim.claim_id, [])
+        graph = propagator.propagate(
+            graph_builder.build(
+                claim=claim,
+                arguments=claim_arguments,
+                exclude_rejected_arguments=exclude_rejected_arguments,
+            )
+        )
+        qbaf_graphs.append(graph)
+        included_arguments = [
+            argument
+            for argument in claim_arguments
+            if argument.argument_id in graph.nodes and argument.argument_id != claim.claim_id
+        ]
+        subclaim_reports.append(
+            decision_mapper.to_subclaim_report(claim, graph, included_arguments)
+        )
+
+    final_status, final_confidence = FinalDecisionAggregator().aggregate(
+        subclaim_reports,
+        bundle=bundle,
+    )
+    report = ReportGenerator(llm_client=llm_client).generate(
+        case=legacy_case,
+        final_status=final_status,
+        final_confidence=final_confidence,
+        subclaim_reports=subclaim_reports,
+        evidence=evidence,
+        evidence_graph=evidence_graph,
+        memory_used=memory_used,
+    )
+    return report, qbaf_graphs, arguments
+
+
+def _contestation_diff(
+    original_report: VerificationReport,
+    revised_report: VerificationReport,
+    original_arguments: list[Argument],
+    revised_arguments: list[Argument],
+    revision_plan,
+) -> dict[str, Any]:
+    original_ids = {argument.argument_id for argument in original_arguments}
+    revised_ids = {argument.argument_id for argument in revised_arguments}
+    return {
+        "original_final_status": original_report.final_status,
+        "revised_final_status": revised_report.final_status,
+        "original_confidence": original_report.final_confidence,
+        "revised_confidence": revised_report.final_confidence,
+        "human_contestation_changed_final_decision": (
+            original_report.final_status != revised_report.final_status
+            or original_report.final_confidence != revised_report.final_confidence
+        ),
+        "changed_arguments": sorted(
+            argument.argument_id
+            for argument in revised_arguments
+            if argument.human_status in {"accepted", "rejected", "edited", "added"}
+        ),
+        "removed_arguments": sorted(
+            argument.argument_id
+            for argument in revised_arguments
+            if argument.human_status == "rejected"
+        ),
+        "added_arguments": sorted(revised_ids - original_ids),
+        "edited_arguments": sorted(
+            argument.argument_id
+            for argument in revised_arguments
+            if argument.human_status == "edited"
+        ),
+        "affected_subclaims": revision_plan.affected_subclaim_ids if revision_plan else [],
+        "affected_evidence": revision_plan.affected_evidence_ids if revision_plan else [],
+        "rerun_from_step": revision_plan.rerun_from_step if revision_plan else None,
+    }
+
+
+def _coerce_subclaims(items: list[Any]) -> list[SubClaim]:
+    return [item if isinstance(item, SubClaim) else SubClaim.model_validate(item) for item in items]
+
+
+def _coerce_evidence(items: list[Any]) -> list[EvidenceItem]:
+    return [
+        item if isinstance(item, EvidenceItem) else EvidenceItem.model_validate(item)
+        for item in items
+    ]
+
+
+def _coerce_arguments(items: list[Any]) -> list[Argument]:
+    return [item if isinstance(item, Argument) else Argument.model_validate(item) for item in items]
+
 def _process_claims_parallel(
     claims: list[SubClaim],
     normalized_evidence: list[EvidenceItem],
@@ -242,6 +574,7 @@ def _process_claims_parallel(
     propagator: QBAFPropagator,
     clash_resolver: ClashResolver,
     decision_mapper: DecisionMapper,
+    exclude_rejected_arguments: bool = True,
 ) -> list[tuple[list[Argument], QBAFGraph, SubClaimReport]]:
     max_workers = _max_parallel_claim_workers(len(claims))
     if max_workers <= 1:
@@ -260,6 +593,7 @@ def _process_claims_parallel(
                 propagator=propagator,
                 clash_resolver=clash_resolver,
                 decision_mapper=decision_mapper,
+                exclude_rejected_arguments=exclude_rejected_arguments,
             )
             for claim in claims
         ]
@@ -282,6 +616,7 @@ def _process_claims_parallel(
                 propagator=propagator,
                 clash_resolver=clash_resolver,
                 decision_mapper=decision_mapper,
+                exclude_rejected_arguments=exclude_rejected_arguments,
             ): claim
             for claim in claims
         }
@@ -306,6 +641,7 @@ def _process_claim(
     propagator: QBAFPropagator,
     clash_resolver: ClashResolver,
     decision_mapper: DecisionMapper,
+    exclude_rejected_arguments: bool = True,
 ) -> tuple[list[Argument], QBAFGraph, SubClaimReport]:
     claim_evidence = evidence_ranker.select_for_claim(
         claim=claim,
@@ -332,7 +668,7 @@ def _process_claim(
         evidence_graph=evidence_graph,
         bundle=bundle,
     )
-    graph = propagator.propagate(graph_builder.build(claim=claim, arguments=scored_arguments))
+    graph = propagator.propagate(graph_builder.build(claim=claim, arguments=scored_arguments, exclude_rejected_arguments=exclude_rejected_arguments))
     if clash_resolver.should_resolve(graph, scored_arguments):
         scored_arguments = clash_resolver.resolve(
             claim=claim,
@@ -347,7 +683,7 @@ def _process_claim(
             bundle=bundle,
         )
         graph = propagator.propagate(
-            graph_builder.build(claim=claim, arguments=scored_arguments)
+            graph_builder.build(claim=claim, arguments=scored_arguments, exclude_rejected_arguments=exclude_rejected_arguments)
         )
 
     subclaim_report = decision_mapper.to_subclaim_report(claim, graph, scored_arguments)
@@ -463,6 +799,11 @@ def _save_case_outputs(
     qbaf_graphs,
     memory_by_claim: dict[str, list[MemoryRecord]],
     report: VerificationReport,
+    save_case_trace: bool = True,
+    review_batch: HumanReviewBatch | None = None,
+    revision_plan=None,
+    report_before_contestation: VerificationReport | None = None,
+    contestation_diff: dict[str, Any] | None = None,
 ) -> None:
     output_dir = project_root() / "data" / "outputs" / "cases" / bundle.case_id
     write_json(output_dir / "input_case_bundle.json", bundle)
@@ -473,8 +814,29 @@ def _save_case_outputs(
     write_json(output_dir / "arguments.json", arguments)
     write_json(output_dir / "qbaf_graphs.json", qbaf_graphs)
     write_json(output_dir / "retrieved_memory.json", memory_by_claim)
+    if save_case_trace:
+        trace = _build_case_trace(
+            bundle=bundle,
+            claims=claims,
+            evidence_items=normalized_evidence,
+            validated_evidence_items=normalized_evidence,
+            arguments=arguments,
+            qbaf_graphs=qbaf_graphs,
+            report=report,
+            raw_evidence=raw_evidence,
+        )
+        write_json(output_dir / "case_trace.json", trace)
     write_json(output_dir / "report.json", report)
     MarkdownRenderer().render_to_file(report, output_dir / "report.md")
+    if review_batch is not None:
+        write_json(output_dir / "human_review_batch.json", review_batch)
+    if revision_plan is not None:
+        write_json(output_dir / "revision_plan.json", revision_plan)
+    if report_before_contestation is not None:
+        write_json(output_dir / "report_before_contestation.json", report_before_contestation)
+        write_json(output_dir / "report_after_contestation.json", report)
+    if contestation_diff is not None:
+        write_json(output_dir / "contestation_diff.json", contestation_diff)
     write_json(output_dir / "reflection_candidates.json", report.memory_update_candidates)
     write_json(output_dir / "verified_memory_updates.json", report.memory_updates_applied)
     (output_dir / "run_log.txt").write_text(
@@ -508,3 +870,53 @@ def _flatten_memory(groups) -> list[MemoryRecord]:
         for item in group:
             flattened[item.memory_id] = item
     return list(flattened.values())
+
+
+def _parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    return value.lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _load_bundle_or_legacy_case(path: Path) -> tuple[CaseBundle, MultimediaCase | None]:
+    data = read_json(path)
+    try:
+        return CaseBundle.model_validate(data), None
+    except Exception:
+        legacy_case = MultimediaCase.model_validate(data)
+        return multimedia_case_to_case_bundle(legacy_case), legacy_case
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run SEMV on one case.")
+    parser.add_argument("--case_path", required=True, help="CaseBundle or legacy MultimediaCase JSON path.")
+    parser.add_argument("--mode", choices=["inference_only", "self_evolving", "test", "bootstrap_memory"], default="inference_only")
+    parser.add_argument("--config", default="configs/default.yaml")
+    parser.add_argument("--human_review_path", default=None)
+    parser.add_argument("--enable_adaptive_revision", default="false")
+    parser.add_argument("--save_case_trace", default="true")
+    parser.add_argument("--exclude_rejected_arguments", default="true")
+    args = parser.parse_args()
+
+    case_path = Path(args.case_path)
+    if not case_path.is_absolute():
+        case_path = project_root() / case_path
+    bundle, legacy_case = _load_bundle_or_legacy_case(case_path)
+    report = run_case_bundle(
+        bundle=bundle,
+        mode=args.mode,
+        config_path=args.config,
+        case_path=case_path,
+        human_review_path=args.human_review_path,
+        enable_adaptive_revision=_parse_bool(args.enable_adaptive_revision),
+        save_case_trace=_parse_bool(args.save_case_trace),
+        exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments),
+    )
+    del legacy_case
+    output_dir = project_root() / "data" / "outputs" / "cases" / report.case_id
+    print(f"Wrote {output_dir / 'report.json'}")
+    print(f"Wrote {output_dir / 'report.md'}")
+
+
+if __name__ == "__main__":
+    main()

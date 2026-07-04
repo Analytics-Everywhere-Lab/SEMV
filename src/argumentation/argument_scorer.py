@@ -75,5 +75,8 @@ class ArgumentScorer:
         evidence_graph: EvidenceGraph,
         bundle: object | None = None,
     ) -> list[Argument]:
-        del bundle
-        return [self.score(claim, argument, evidence, evidence_graph) for argument in arguments]
+        scored = [self.score(claim, argument, evidence, evidence_graph) for argument in arguments]
+        case_id = getattr(bundle, "case_id", None) if bundle is not None else None
+        if case_id is None:
+            return scored
+        return [argument.model_copy(update={"case_id": case_id}) for argument in scored]

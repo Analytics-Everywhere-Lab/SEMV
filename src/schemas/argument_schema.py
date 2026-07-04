@@ -4,8 +4,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.schemas.contestation_schema import ArgumentProvenance
+
 
 ArgumentStance = Literal["support", "attack", "mixed", "neutral"]
+HumanArgumentStatus = Literal["unreviewed", "accepted", "rejected", "edited", "added"]
 
 
 class Argument(BaseModel):
@@ -35,4 +38,7 @@ class Argument(BaseModel):
     verification_notes: str | None = None
     score: float = Field(default=0.0, ge=0.0, le=1.0)
     uncertainty_flags: list[str] = Field(default_factory=list)
+    provenance: ArgumentProvenance | None = None
+    human_status: HumanArgumentStatus = "unreviewed"
+    human_original_argument_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

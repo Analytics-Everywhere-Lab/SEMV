@@ -29,3 +29,4 @@ class QBAFGraph(BaseModel):
     edges: list[QBAFEdge] = Field(default_factory=list)
     claim_score: float = Field(default=0.5, ge=0.0, le=1.0)
     uncertainty_flags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)

@@ -1,15 +1,36 @@
 from __future__ import annotations
 
+from src.contestation.contestation_applier import filter_arguments_for_qbaf, human_status_counts
 from src.schemas.argument_schema import Argument
 from src.schemas.qbaf_schema import QBAFEdge, QBAFGraph, QBAFNode
 
 
 class QBAFGraphBuilder:
-    def build(self, claim: object, arguments: list[Argument]) -> QBAFGraph:
+    def build(
+        self,
+        claim: object,
+        arguments: list[Argument],
+        exclude_rejected_arguments: bool = True,
+    ) -> QBAFGraph:
         claim_id = getattr(claim, "claim_id")
         claim_type = getattr(claim, "claim_type")
         statement = getattr(claim, "statement")
         graph = QBAFGraph(claim_id=claim_id)
+        original_arguments = list(arguments)
+        arguments = filter_arguments_for_qbaf(
+            original_arguments,
+            exclude_rejected_arguments=exclude_rejected_arguments,
+        )
+        graph = graph.model_copy(
+            update={
+                "metadata": {
+                    "human_status_counts": human_status_counts(original_arguments),
+                    "arguments_included": len(arguments),
+                    "arguments_excluded": len(original_arguments) - len(arguments),
+                    "exclude_rejected_arguments": exclude_rejected_arguments,
+                }
+            }
+        )
         graph.nodes[claim_id] = QBAFNode(
             node_id=claim_id,
             node_type="claim",
