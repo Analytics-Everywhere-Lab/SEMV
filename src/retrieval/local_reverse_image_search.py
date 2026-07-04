@@ -14,8 +14,13 @@ class LocalReverseImageSearch:
         self.config = media_config(config)
         self.index = index or VisualIndex(config=config)
 
-    def search(self, paths: Iterable[str | Path], case_id: str = "") -> list[EvidenceItem]:
-        query_paths = [Path(path) for path in paths]
+    def search(
+        self,
+        paths: Iterable[str | Path] | None = None,
+        case_id: str = "",
+        image_paths: Iterable[str | Path] | None = None,
+    ) -> list[EvidenceItem]:
+        query_paths = [Path(path) for path in (image_paths if image_paths is not None else paths or [])]
         if not self.config.get("enable_local_reverse_search", True):
             return [self._uncertainty_item(path, "local_reverse_search_disabled") for path in query_paths]
         evidence: list[EvidenceItem] = []
@@ -65,9 +70,16 @@ class LocalReverseImageSearch:
                 )
         return evidence
 
-    def add_assets(self, paths: Iterable[str | Path], case_id: str) -> None:
+    def add_assets(
+        self,
+        paths: Iterable[str | Path] | None = None,
+        case_id: str = "",
+        image_paths: Iterable[str | Path] | None = None,
+    ) -> None:
         if self.config.get("enable_local_reverse_search", True):
-            self.index.add_assets(list(paths), case_id=case_id)
+            assets = list(image_paths if image_paths is not None else paths or [])
+            if assets:
+                self.index.add_assets(assets, case_id=case_id)
 
     @staticmethod
     def _uncertainty_item(path: Path, flag: str) -> EvidenceItem:

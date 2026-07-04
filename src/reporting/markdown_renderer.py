@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.schemas.evidence_schema import EvidenceItem
 from src.schemas.report_schema import VerificationReport
 
 
@@ -45,6 +46,8 @@ class MarkdownRenderer:
                 lines.append("- Not applicable or not generated.")
             for subclaim in matched:
                 lines.extend(_render_subclaim(subclaim))
+
+        lines.extend(_render_media_analysis(report))
 
         lines.extend(["", "## Evidence Pool"])
         for item in report.evidence:
@@ -93,6 +96,79 @@ class MarkdownRenderer:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(self.render(report), encoding="utf-8")
+
+
+_MEDIA_SOURCE_TYPES = {
+    "media_metadata": "Metadata",
+    "metadata_exiftool": "Metadata",
+    "metadata_ffprobe": "Metadata",
+    "scene_keyframe": "Keyframe",
+    "keyframe": "Keyframe",
+    "visual_caption": "VLM",
+    "visual_objects": "VLM",
+    "visual_vqa": "VLM",
+    "frame_analysis": "VLM",
+    "ocr": "OCR",
+    "asr": "ASR",
+    "forensic_analysis": "Forensics",
+    "reverse_image_local": "Local reverse search",
+    "reverse_image_web_candidate": "Web reverse search",
+    "visual_similarity": "Visual similarity",
+    "geolocation_candidate": "Geolocation clue",
+}
+
+
+def _render_media_analysis(report: VerificationReport) -> list[str]:
+    media_items = [item for item in report.evidence if _is_media_analysis_item(item)]
+    lines = ["", "## Media Analysis"]
+    if not media_items:
+        lines.append("- No media-derived analysis evidence was generated.")
+        return lines
+
+    lines.extend([
+        "| Type | Evidence | Source / frame | Reliability | Key finding |",
+        "| --- | --- | --- | ---: | --- |",
+    ])
+    for item in media_items:
+        source = item.frame_path or item.media_path or item.source
+        content = item.content
+        if item.uncertainty_flags:
+            content = f"{content} Flags: {', '.join(item.uncertainty_flags)}"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _clean_table_text(_MEDIA_SOURCE_TYPES.get(item.source_type, item.source_type)),
+                    f"`{_clean_table_text(item.evidence_id)}`",
+                    _clean_table_text(source, limit=80),
+                    f"{item.reliability:.2f}",
+                    _clean_table_text(content, limit=220),
+                ]
+            )
+            + " |"
+        )
+    return lines
+
+
+def _is_media_analysis_item(item: EvidenceItem) -> bool:
+    if item.source_type in _MEDIA_SOURCE_TYPES:
+        return True
+    if item.source_type != "synthetic_uncertainty":
+        return False
+    if item.media_path or item.frame_path:
+        return True
+    adapter = ""
+    if item.provenance:
+        adapter = str(item.provenance.metadata.get("adapter", ""))
+    return adapter in {"metadata", "ocr", "asr", "vlm", "forensics", "scene_keyframe", "local_reverse_image_search"}
+
+
+def _clean_table_text(value: object, limit: int = 120) -> str:
+    text = str(value or "")
+    text = " ".join(text.split()).replace("|", "\\|")
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _render_human_contestation(report: VerificationReport) -> list[str]:

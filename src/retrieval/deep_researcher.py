@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from src.retrieval.factcheck_search import FactCheckSearch
+from src.retrieval.free_web_search import FreeWebSearch
+from src.retrieval.geolocation_candidate_extractor import GeolocationCandidateExtractor
 from src.retrieval.geolocation_search import GeolocationSearch
 from src.retrieval.news_search import NewsSearch
 from src.retrieval.reverse_search import ReverseSearch
@@ -21,7 +23,9 @@ class DeepResearcher:
             FactCheckSearch(cached),
             NewsSearch(cached),
             GeolocationSearch(cached),
+            FreeWebSearch(),
         ]
+        self.geolocation_candidate_extractor = GeolocationCandidateExtractor()
 
     def research(
         self,
@@ -29,8 +33,14 @@ class DeepResearcher:
         plan: ResearchPlan,
         existing_evidence: list[EvidenceItem],
     ) -> list[EvidenceItem]:
-        del existing_evidence
         found: dict[str, EvidenceItem] = {}
+        for item in self._relevant_existing_evidence(claim, existing_evidence):
+            found[item.evidence_id] = item
+
+        if claim.claim_type == "where":
+            for item in self.geolocation_candidate_extractor.extract(existing_evidence):
+                found[item.evidence_id] = item
+
         for adapter in self.adapters:
             for item in adapter.search(claim, plan):
                 found[item.evidence_id] = item
@@ -60,3 +70,19 @@ class DeepResearcher:
                 ),
             )
         ]
+
+    @staticmethod
+    def _relevant_existing_evidence(
+        claim: SubClaim,
+        existing_evidence: list[EvidenceItem],
+    ) -> list[EvidenceItem]:
+        relevant = []
+        claim_terms = {token for token in claim.statement.lower().split() if len(token) > 3}
+        for item in existing_evidence:
+            if claim.claim_type in item.supports_claim_types:
+                relevant.append(item)
+                continue
+            text = f"{item.title or ''} {item.content}".lower()
+            if claim_terms and any(term in text for term in claim_terms):
+                relevant.append(item)
+        return relevant

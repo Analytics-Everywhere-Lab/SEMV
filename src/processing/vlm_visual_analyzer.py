@@ -23,11 +23,13 @@ class VLMVisualAnalyzer:
 
     def analyze(
         self,
-        image_paths: Iterable[str | Path],
+        image_paths: Iterable[str | Path] | None = None,
         claim: str = "",
         context: str | None = None,
+        case_id: str = "",
     ) -> list[EvidenceItem]:
-        paths = [Path(path) for path in image_paths]
+        del case_id
+        paths = [Path(path) for path in image_paths or []]
         if not paths:
             return []
         if not self.config.get("enable_vlm_adapter", True):

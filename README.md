@@ -22,18 +22,19 @@ evaluation protocols.
 For each case, the pipeline performs the following stages:
 
 1. Canonicalize the input as a `CaseBundle`.
-2. Load media assets and extract available image, video, OCR, ASR, metadata, and
-   keyframe signals.
+2. Load media assets and extract real metadata, scene-aware video keyframes,
+   OCR, ASR, VLM observations, forensic signals, and local reverse-image matches.
 3. Use provided claims or decompose the main claim into scoped verification
    subclaims.
 4. Retrieve relevant verified memory when enabled by the case run configuration.
-5. Plan research and optionally run web or reverse-search evidence retrieval.
+5. Plan research and optionally run cached, free-web, geolocation, and
+   reverse-search evidence retrieval while reusing existing media evidence.
 6. Normalize evidence and construct an evidence graph.
 7. Generate, verify, and score support/attack arguments per subclaim.
 8. Build and propagate QBAF graphs, resolving clashes when required.
 9. Aggregate subclaim decisions into a final verification label and confidence.
-10. Render structured JSON and Markdown reports with evidence, argument, QBAF,
-    uncertainty, and memory traces.
+10. Render structured JSON and Markdown reports with evidence, media analysis,
+    argument, QBAF, uncertainty, and memory traces.
 11. Optionally reflect after prediction to produce verified memory-update
     candidates.
 
@@ -152,7 +153,7 @@ src/evidence/             Evidence normalization, provenance, and graph building
 src/ingestion/            Dataset adapters and canonical bundle writer
 src/memory/               Memory retrieval, verification, consolidation, seeding
 src/planning/             Claim decomposition and research planning
-src/processing/           Media loading, metadata, OCR, ASR, keyframe extraction
+src/processing/           Media loading, metadata, OCR, ASR, VLM, forensics, keyframes
 src/qbaf/                 QBAF graph construction, propagation, decision mapping
 src/reflection/           Failure analysis and memory-update candidate generation
 src/reporting/            JSON and Markdown report rendering
@@ -167,8 +168,11 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Dependencies are intentionally small: `pydantic`, `PyYAML`, `requests`,
-`Pillow`, and `pytest`.
+Core dependencies include `pydantic`, `PyYAML`, `requests`, `Pillow`, and
+`pytest`. Real media processing also uses `opencv-python-headless`, `numpy`,
+`scenedetect`, `easyocr`, `faster-whisper`, `imagehash`, `open-clip-torch`,
+`faiss-cpu`, `beautifulsoup4`, `trafilatura`, and `duckduckgo_search`. Some
+adapters also require external local binaries or services, noted below.
 
 ## LLM Backend
 
@@ -186,9 +190,63 @@ OLLAMA_TIMEOUT=120
 `OLLAMA_MODEL` must name a model already available to the local Ollama server.
 Tests can inject fake LLM clients and do not require Ollama.
 
+## Media Processing and Tool Configuration
+
+Real multimedia adapters are configured in `configs/tools.yaml` and can also be
+controlled with environment variables. `RawMediaProcessor` now wires the media
+flow end-to-end for every case media asset:
+
+1. metadata inspection through Pillow plus ExifTool and FFprobe when available;
+2. scene-aware video keyframe extraction with PySceneDetect and FFmpeg, falling
+   back to uniform timestamps;
+3. OCR over original images and extracted keyframes;
+4. VLM analysis over original images and extracted keyframes through Ollama;
+5. basic forensic analysis, including metadata flags and image-level checks;
+6. ASR for video audio through FFmpeg and faster-whisper;
+7. local reverse-image search over original images and keyframes, backed by the
+   local visual index.
+
+Relevant media flags in `configs/tools.yaml` include:
+
+```yaml
+media:
+  enable_ffmpeg_keyframes: true
+  keyframe_strategy: scene_detect
+  max_keyframes_per_video: 8
+  deduplicate_keyframes: true
+
+  enable_vlm_adapter: true
+  vlm_provider: ollama
+  vlm_model: llava
+
+  enable_ocr_adapter: true
+  enable_asr_adapter: true
+  enable_forensic_adapter: true
+  enable_local_reverse_search: true
+```
+
+Environment overrides are supported for the heavy adapters:
+
+```env
+SEMV_ENABLE_VLM=true
+SEMV_VLM_PROVIDER=ollama
+SEMV_VLM_MODEL=llava
+SEMV_ENABLE_OCR=true
+SEMV_ENABLE_ASR=true
+SEMV_ENABLE_FORENSICS=true
+SEMV_ENABLE_LOCAL_REVERSE=true
+SEMV_ENABLE_FREE_WEB_SEARCH=false
+```
+
+If optional binaries, models, or local services are missing, adapters should emit
+synthetic uncertainty evidence instead of crashing. For full local capability,
+install FFmpeg/FFprobe for video and audio processing, ExifTool for richer
+metadata extraction, EasyOCR model dependencies for OCR, faster-whisper models
+for ASR, and an Ollama multimodal model such as `llava` for VLM analysis.
+
 ## Parallel Execution
 
-The new pipeline can parallelize expensive per-subclaim work. Two environment
+The pipeline can parallelize expensive per-subclaim work. Two environment
 variables control this behavior:
 
 ```env
@@ -317,8 +375,20 @@ run_log.txt
 ```
 
 `report.json` is the structured verification report. `report.md` is the
-readable report. Intermediate artifacts are written to support inspection,
-ablation analysis, human contestation, and error analysis.
+readable report. Markdown output now includes a dedicated `Media Analysis`
+section summarizing metadata, keyframes, OCR, ASR, VLM, forensic, reverse-search,
+and geolocation-clue evidence before the generic evidence pool. Intermediate
+artifacts are written to support inspection, ablation analysis, human
+contestation, and error analysis.
+
+Media-derived working files are written under:
+
+```text
+data/outputs/_media/<case_id>/media_<index>/
+```
+
+These folders can contain extracted keyframes, ASR audio intermediates, and
+forensic outputs such as ELA images.
 
 For a full contestation implementation, the recommended additional artifacts are:
 
@@ -400,7 +470,8 @@ memory.
 - Local LLM behavior depends on the configured Ollama model and decoding
   parameters.
 - Web and reverse-search behavior is controlled by each case `run_config` and
-  tool configuration.
+  tool configuration. `DeepResearcher` also reuses existing media evidence and
+  derives geolocation candidates from OCR, ASR, VLM, metadata, and web clues.
 - Parallel execution can change wall-clock runtime but should preserve output
   ordering by claim.
 - Gold leakage is checked before pipeline execution.
@@ -415,8 +486,8 @@ pytest
 
 The test suite covers case-bundle schemas, ingestion adapters, leakage guards,
 claim decomposition, QBAF propagation and scoring, memory retrieval/update
-behavior, temporal and geolocation metrics, evaluation adapters, and end-to-end
-report generation.
+behavior, temporal and geolocation metrics, evaluation adapters, media-derived
+evidence handling, and end-to-end report generation.
 
 ## Citation
 

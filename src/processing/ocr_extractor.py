@@ -18,10 +18,11 @@ class OCRExtractor:
 
     def extract(
         self,
-        media_or_frame_paths: MediaItem | Iterable[str | Path],
+        media_or_frame_paths: MediaItem | Iterable[str | Path] | None = None,
         case_id: str = "",
+        image_paths: Iterable[str | Path] | None = None,
     ) -> list[EvidenceItem]:
-        paths = self._coerce_paths(media_or_frame_paths)
+        paths = self._coerce_paths(image_paths if image_paths is not None else media_or_frame_paths)
         if not paths:
             return []
         if not self.config.get("enable_ocr_adapter", True):
@@ -132,7 +133,9 @@ class OCRExtractor:
         return self._reader
 
     @staticmethod
-    def _coerce_paths(media_or_frame_paths: MediaItem | Iterable[str | Path]) -> list[Path]:
+    def _coerce_paths(media_or_frame_paths: MediaItem | Iterable[str | Path] | None) -> list[Path]:
+        if media_or_frame_paths is None:
+            return []
         if isinstance(media_or_frame_paths, MediaItem):
             return [Path(media_or_frame_paths.path)]
         return [Path(path) for path in media_or_frame_paths]
