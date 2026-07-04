@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Protocol
 
 import requests
@@ -12,6 +14,16 @@ from src.utils.env_loader import load_env_file
 
 class LLMClient(Protocol):
     def generate(self, prompt: str, system: str | None = None, **kwargs: Any) -> str:
+        ...
+
+    def generate_with_images(
+        self,
+        prompt: str,
+        image_paths: list[Path],
+        system: str | None = None,
+        format: str | dict = "json",
+        **kwargs: Any,
+    ) -> str:
         ...
 
     def generate_text(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> str:
@@ -62,8 +74,62 @@ class OllamaLLMClient:
         response.raise_for_status()
         return str(response.json().get("response", "")).strip()
 
+
+    def generate_with_images(
+        self,
+        prompt: str,
+        image_paths: list[Path],
+        system: str | None = None,
+        format: str | dict = "json",
+        **kwargs: Any,
+    ) -> str:
+        options = {
+            "temperature": kwargs.pop("temperature", self.temperature),
+            "num_ctx": kwargs.pop("num_ctx", self.num_ctx),
+        }
+        payload = {
+            "model": kwargs.pop("model", self.model),
+            "prompt": prompt,
+            "system": system,
+            "stream": False,
+            "format": format,
+            "images": [base64.b64encode(path.read_bytes()).decode("ascii") for path in image_paths],
+            "options": options,
+        }
+        response = requests.post(
+            f"{self.base_url}/api/generate",
+            json=payload,
+            timeout=kwargs.pop("timeout", self.timeout),
+        )
+        response.raise_for_status()
+        return str(response.json().get("response", "")).strip()
+
     def generate_text(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> str:
         return self.generate(user_prompt, system=system_prompt, **kwargs)
+
+    def generate_with_images(
+        self,
+        prompt: str,
+        image_paths: list[Path],
+        system: str | None = None,
+        format: str | dict = "json",
+        **kwargs: Any,
+    ) -> str:
+        self.call_count += 1
+        call_id = self.call_count
+        self.logger.info(
+            "LLM image call %s started (prompt_chars=%s, images=%s)",
+            call_id,
+            len(prompt),
+            len(image_paths),
+        )
+        if not hasattr(self.wrapped, "generate_with_images"):
+            raise NotImplementedError("Wrapped LLM client does not support image generation")
+        response_text = self.wrapped.generate_with_images(
+            prompt, image_paths, system=system, format=format, **kwargs
+        )
+        self._log_response(call_id, response_text)
+        return response_text
 
     def generate_json(
         self,
@@ -108,8 +174,62 @@ class LoggingLLMClient:
         self._log_response(call_id, response_text)
         return response_text
 
+
+    def generate_with_images(
+        self,
+        prompt: str,
+        image_paths: list[Path],
+        system: str | None = None,
+        format: str | dict = "json",
+        **kwargs: Any,
+    ) -> str:
+        options = {
+            "temperature": kwargs.pop("temperature", self.temperature),
+            "num_ctx": kwargs.pop("num_ctx", self.num_ctx),
+        }
+        payload = {
+            "model": kwargs.pop("model", self.model),
+            "prompt": prompt,
+            "system": system,
+            "stream": False,
+            "format": format,
+            "images": [base64.b64encode(path.read_bytes()).decode("ascii") for path in image_paths],
+            "options": options,
+        }
+        response = requests.post(
+            f"{self.base_url}/api/generate",
+            json=payload,
+            timeout=kwargs.pop("timeout", self.timeout),
+        )
+        response.raise_for_status()
+        return str(response.json().get("response", "")).strip()
+
     def generate_text(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> str:
         return self.generate(user_prompt, system=system_prompt, **kwargs)
+
+    def generate_with_images(
+        self,
+        prompt: str,
+        image_paths: list[Path],
+        system: str | None = None,
+        format: str | dict = "json",
+        **kwargs: Any,
+    ) -> str:
+        self.call_count += 1
+        call_id = self.call_count
+        self.logger.info(
+            "LLM image call %s started (prompt_chars=%s, images=%s)",
+            call_id,
+            len(prompt),
+            len(image_paths),
+        )
+        if not hasattr(self.wrapped, "generate_with_images"):
+            raise NotImplementedError("Wrapped LLM client does not support image generation")
+        response_text = self.wrapped.generate_with_images(
+            prompt, image_paths, system=system, format=format, **kwargs
+        )
+        self._log_response(call_id, response_text)
+        return response_text
 
     def generate_json(
         self,

@@ -1,12 +1,29 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from src.processing.vlm_visual_analyzer import VLMVisualAnalyzer
 from src.schemas.case_schema import MediaItem
 from src.schemas.evidence_schema import EvidenceItem, Provenance
 from src.utils.hashing import stable_hash_text
 
 
 class VisualDescriber:
+    """Backward-compatible wrapper around the real VLM analyzer.
+
+    Existing callers can still ask for a single metadata-derived description; the
+    media pipeline now uses VLMVisualAnalyzer directly for grounded frame evidence.
+    """
+
+    def __init__(self, config: dict | None = None) -> None:
+        self.vlm = VLMVisualAnalyzer(config)
+
     def describe(self, media: MediaItem, metadata: dict) -> EvidenceItem:
+        path = Path(metadata.get("path", media.path))
+        items = self.vlm.analyze([path]) if path.exists() else []
+        if items and items[0].source_type != "synthetic_uncertainty":
+            return items[0]
+
         parts = [f"Media path: {metadata.get('path', media.path)}."]
         if media.description:
             parts.append(f"Provided description: {media.description}.")

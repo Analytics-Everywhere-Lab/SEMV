@@ -2,8 +2,34 @@ retrieval:
   live_web_enabled: false
   cached_evidence_enabled: true
   manual_case_evidence_enabled: true
+  free_web_search_enabled: false
+  max_web_results_per_claim: 5
+  max_downloaded_candidate_images: 20
 
 media:
   enable_ffmpeg_keyframes: true
-  enable_ocr_adapter: false
-  enable_asr_adapter: false
+  keyframe_strategy: "scene_detect"
+  max_keyframes_per_video: 8
+  deduplicate_keyframes: true
+
+  enable_vlm_adapter: true
+  vlm_provider: "ollama"
+  vlm_model: "llava"
+  vlm_timeout_sec: 120
+
+  enable_ocr_adapter: true
+  ocr_engine: "easyocr"
+  ocr_languages: ["en"]
+
+  enable_asr_adapter: true
+  asr_engine: "faster_whisper"
+  asr_model_size: "base"
+  asr_language: null
+
+  enable_forensic_adapter: true
+  forensic_engine: "basic"
+
+  enable_local_reverse_search: true
+  visual_index_dir: "data/visual_index"
+  phash_threshold: 10
+  clip_similarity_threshold: 0.84

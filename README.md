@@ -7,6 +7,12 @@ subclaims, collecting multimodal evidence, constructing support and attack
 arguments, propagating argument strength over QBAF graphs, and producing both
 machine-readable and human-readable verification reports.
 
+The project is designed for research on multimedia verification pipelines that
+must remain auditable after prediction. In addition to standard inference and
+evaluation, the repository includes memory-enabled self-evolution hooks,
+uncertainty tracking, and a human-contestation interface for reviewing and
+correcting model-generated arguments.
+
 This repository is organized as research code for running single-case inference,
 canonical dataset conversion, memory-enabled ablations, and MV2026/COSMOS-style
 evaluation protocols.
@@ -26,11 +32,110 @@ For each case, the pipeline performs the following stages:
 7. Generate, verify, and score support/attack arguments per subclaim.
 8. Build and propagate QBAF graphs, resolving clashes when required.
 9. Aggregate subclaim decisions into a final verification label and confidence.
-10. Optionally reflect after prediction to produce verified memory-update
+10. Render structured JSON and Markdown reports with evidence, argument, QBAF,
+    uncertainty, and memory traces.
+11. Optionally reflect after prediction to produce verified memory-update
     candidates.
 
 Gold labels and gold reports are guarded by leakage checks and are only used
 post-prediction in self-evolving or bootstrap-memory modes.
+
+## Human Contestation and Adaptive Revision
+
+SEMV is intended to support contestable verification rather than a closed
+one-shot prediction. The human reviewer does not need to directly edit every
+internal pipeline artifact. Instead, the contestation interface is centered on
+arguments, because arguments are the bridge between evidence, subclaims, QBAF
+reasoning, and the final decision.
+
+The recommended reviewer action space is deliberately small:
+
+- `accept`: confirm that an existing argument is valid and should remain active.
+- `reject`: mark an existing argument as invalid, unsupported, misleading, or
+  irrelevant.
+- `edit`: correct the text, stance, score hint, linked evidence, or scope of an
+  existing argument.
+- `add`: introduce a missing support or attack argument for a subclaim.
+
+A reviewer should normally inspect all generated arguments in one batch. This
+keeps the human workflow simple while still allowing the framework to infer
+where revision is needed. Each action can include a `revision_target` metadata
+field telling the system which stage should be revisited.
+
+Suggested `revision_target` values are:
+
+```text
+claim_decomposition
+media_processing
+retrieval
+evidence_normalization
+argument_generation
+argument_verification
+argument_scoring
+qbaf_propagation
+final_aggregation
+reporting
+```
+
+This makes the contestation mechanism adaptive. For example, rejecting an
+argument because the retrieved source does not actually support the claim should
+send the pipeline back to `retrieval`, not merely rescore the argument. Editing
+an argument's stance should restart from `argument_verification` or
+`argument_scoring`. Adding a missing counterargument can restart from
+`qbaf_propagation` if the evidence is already present, or from `retrieval` if new
+evidence is required.
+
+A typical feedback file can use the following shape:
+
+```json
+{
+  "case_id": "ID333",
+  "reviewer_id": "human_1",
+  "review_scope": "all_arguments",
+  "actions": [
+    {
+      "action": "reject",
+      "argument_id": "arg_where_002",
+      "reason": "The cited source describes a similar scene but not the claimed location.",
+      "revision_target": "retrieval"
+    },
+    {
+      "action": "edit",
+      "argument_id": "arg_when_001",
+      "revised_text": "The evidence supports that the video was online by the publication date, but not the exact recording date.",
+      "stance": "attack",
+      "score_hint": 0.72,
+      "revision_target": "argument_scoring"
+    },
+    {
+      "action": "add",
+      "claim_id": "authenticity_1",
+      "stance": "support",
+      "text": "No visible editing artifacts are reported by the available forensic evidence.",
+      "evidence_ids": ["ev_forensic_001"],
+      "revision_target": "qbaf_propagation"
+    }
+  ]
+}
+```
+
+The current codebase already contains the main contestability hooks:
+
+- `CaseBundle.run_config.allow_human_contestation` controls whether a case is
+  intended to allow human review.
+- `scripts/run_case.py` exposes `--human-feedback-json` as the CLI entry point
+  for feedback files.
+- `VerificationReport.reflection_logs[*].human_feedback` provides a structured
+  place to preserve human feedback during reflection.
+- `report.md` includes a contestation-log section.
+
+Important implementation note: in the current ZIP, the canonical
+`run_case_bundle` path does not yet fully consume `--human-feedback-json` to
+perform automatic targeted re-execution. The README therefore treats the JSON
+above as the intended integration contract for the contestation/revision module.
+A complete implementation should parse the feedback file, map each action to the
+lowest affected stage, re-run downstream stages only, and persist a contested
+report alongside the original report.
 
 ## Repository Layout
 
@@ -49,6 +154,7 @@ src/memory/               Memory retrieval, verification, consolidation, seeding
 src/planning/             Claim decomposition and research planning
 src/processing/           Media loading, metadata, OCR, ASR, keyframe extraction
 src/qbaf/                 QBAF graph construction, propagation, decision mapping
+src/reflection/           Failure analysis and memory-update candidate generation
 src/reporting/            JSON and Markdown report rendering
 tests/                    Unit and integration tests
 ```
@@ -79,6 +185,22 @@ OLLAMA_TIMEOUT=120
 
 `OLLAMA_MODEL` must name a model already available to the local Ollama server.
 Tests can inject fake LLM clients and do not require Ollama.
+
+## Parallel Execution
+
+The new pipeline can parallelize expensive per-subclaim work. Two environment
+variables control this behavior:
+
+```env
+SEMV_PARALLEL_DEEP_RESEARCH=true
+SEMV_PARALLEL_CLAIMS=true
+SEMV_MAX_WORKERS=2
+```
+
+`SEMV_PARALLEL_DEEP_RESEARCH` parallelizes deep-research calls across subclaims.
+`SEMV_PARALLEL_CLAIMS` parallelizes argument generation, verification, scoring,
+QBAF construction, and decision mapping across subclaims. `SEMV_MAX_WORKERS`
+limits both parallel sections so local LLM and tool backends are not overloaded.
 
 ## Input Format
 
@@ -155,6 +277,19 @@ Supported modes are:
 - `test`: test-safe execution with leakage guards.
 - `bootstrap_memory`: post-prediction memory bootstrapping from available gold.
 
+A feedback file can be supplied with the current CLI shape:
+
+```bash
+python scripts/run_case.py \
+  --case-bundle data/canonical/mv2026/ID333/case_bundle.json \
+  --mode self_evolving \
+  --human-feedback-json data/feedback/ID333_human_feedback.json
+```
+
+As noted above, this argument is currently a scaffold for the contestation
+integration. Full adaptive re-execution requires wiring the feedback parser into
+`run_case_bundle`.
+
 ## Outputs
 
 Each run writes artifacts to:
@@ -183,7 +318,20 @@ run_log.txt
 
 `report.json` is the structured verification report. `report.md` is the
 readable report. Intermediate artifacts are written to support inspection,
-ablation analysis, and error analysis.
+ablation analysis, human contestation, and error analysis.
+
+For a full contestation implementation, the recommended additional artifacts are:
+
+```text
+contestation_package.json
+human_feedback.json
+revision_plan.json
+contested_report.json
+contested_report.md
+```
+
+These artifacts should preserve the original prediction and make the human-led
+revision auditable rather than overwriting the first-pass output.
 
 ## Evaluation Protocols
 
@@ -220,7 +368,7 @@ coverage, report-structure checks, hallucination checks, accuracy, balanced
 accuracy, macro F1, AUROC, average precision, expected calibration error, and
 Brier score.
 
-## Memory
+## Memory and Self-Evolution
 
 Memory stores are JSONL files under `data/memory/`:
 
@@ -241,15 +389,23 @@ Memory retrieval and updates are controlled by `CaseBundle.run_config` and by
 the active evaluation protocol. Protocols can allow retrieval while freezing
 updates on held-out splits.
 
+In self-evolving or bootstrap-memory modes, gold labels and reports are still
+blocked before prediction. After prediction, the reflection module can compare
+prediction behavior against available gold annotations and generate candidate
+memory updates. These candidates should be verified before being added to active
+memory.
+
 ## Reproducibility Notes
 
 - Local LLM behavior depends on the configured Ollama model and decoding
   parameters.
 - Web and reverse-search behavior is controlled by each case `run_config` and
   tool configuration.
+- Parallel execution can change wall-clock runtime but should preserve output
+  ordering by claim.
 - Gold leakage is checked before pipeline execution.
-- Intermediate artifacts are persisted for auditability and ablation studies.
-- Tests use deterministic fakes where possible.
+- Intermediate artifacts are persisted for auditability, ablation studies, and
+  contestation review.
 
 ## Tests
 
