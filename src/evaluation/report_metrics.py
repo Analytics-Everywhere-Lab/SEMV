@@ -13,7 +13,7 @@ REQUIRED_SECTIONS = [
     "Authenticity / Forensic Analysis",
     "Supporting Sources",
     "Evidence Table",
-    "QBAF Reasoning",
+    "A-QBAF Reasoning",
     "Uncertainty Notes",
 ]
 

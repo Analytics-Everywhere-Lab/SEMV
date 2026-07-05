@@ -8,13 +8,13 @@ from src.memory.seed_memory import seed_semantic_rules
 from src.utils.io import project_root, read_yaml, write_json
 
 ABLATION_VARIANTS = {
-    "A0": {"name": "No memory, no QBAF", "use_memory": False, "use_qbaf": False},
-    "A1": {"name": "QBAF only", "use_memory": False, "use_qbaf": True},
-    "A2": {"name": "QBAF + episodic memory", "memory_types": ["episodic"]},
-    "A3": {"name": "QBAF + semantic memory", "memory_types": ["semantic_rule"]},
-    "A4": {"name": "QBAF + failure memory", "memory_types": ["failure"]},
-    "A5": {"name": "QBAF + all memory, no Verify Agent", "argument_verifier": False},
-    "A6": {"name": "QBAF + all memory + Verify Agent", "argument_verifier": True},
+    "A0": {"name": "No memory, no A-QBAF", "use_memory": False, "use_qbaf": False},
+    "A1": {"name": "A-QBAF only", "use_memory": False, "use_qbaf": True},
+    "A2": {"name": "A-QBAF + episodic memory", "memory_types": ["episodic"]},
+    "A3": {"name": "A-QBAF + semantic memory", "memory_types": ["semantic_rule"]},
+    "A4": {"name": "A-QBAF + failure memory", "memory_types": ["failure"]},
+    "A5": {"name": "A-QBAF + all memory, no Verify Agent", "argument_verifier": False},
+    "A6": {"name": "A-QBAF + all memory + Verify Agent", "argument_verifier": True},
     "A7": {"name": "Full system without clash resolution", "clash_resolution": False},
     "A8": {"name": "Full system with clash resolution", "clash_resolution": True},
     "A9": {"name": "Full system without argument verifier", "argument_verifier": False},

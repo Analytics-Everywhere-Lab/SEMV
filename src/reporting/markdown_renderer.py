@@ -57,7 +57,7 @@ class MarkdownRenderer:
                 f"(reliability={item.reliability:.2f}, relevance={item.relevance:.2f})"
             )
 
-        lines.extend(["", "## QBAF Reasoning"])
+        lines.extend(["", "## A-QBAF Reasoning"])
         for subclaim in report.subclaim_reports:
             lines.append(
                 f"- `{subclaim.claim_id}` {subclaim.decision} at {subclaim.score:.3f}; "

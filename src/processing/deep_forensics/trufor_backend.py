@@ -22,6 +22,9 @@ class TruForBackend(DeepForensicBackend):
         self.device = str(config.get("forensic_device", "cuda"))
         self.threshold = float(config.get("forensic_manipulation_threshold", 0.50))
         self.min_confidence = float(config.get("forensic_min_confidence", 0.30))
+        self.python_bin = str(config.get("forensic_trufor_python", "python"))
+        self.timeout_sec = int(config.get("forensic_trufor_timeout_sec", 300))
+        self.save_maps = bool(config.get("forensic_save_maps", True))
 
     def analyze_images(self, image_paths: list[Path], output_dir: Path) -> list[DeepForensicResult]:
         self._validate()
@@ -58,7 +61,7 @@ class TruForBackend(DeepForensicBackend):
     def _run_trufor(self, image_path: Path, output_dir: Path) -> None:
         gpu_arg = "0" if self.device.startswith("cuda") else "-1"
         cmd = [
-            "python",
+            self.python_bin,
             "test.py",
             "-g",
             gpu_arg,
@@ -77,7 +80,7 @@ class TruForBackend(DeepForensicBackend):
             cwd=str(self.repo_dir),
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=self.timeout_sec,
         )
 
         if proc.returncode != 0:
@@ -101,16 +104,17 @@ class TruForBackend(DeepForensicBackend):
         confidence_map_path = None
         overlay_path = None
 
-        if anomaly is not None:
-            anomaly_map_path = str(output_dir / f"{image_path.stem}_trufor_anomaly.png")
-            _save_grayscale_map(anomaly, Path(anomaly_map_path))
+        if self.save_maps:
+            if anomaly is not None:
+                anomaly_map_path = str(output_dir / f"{image_path.stem}_trufor_anomaly.png")
+                _save_grayscale_map(anomaly, Path(anomaly_map_path))
 
-            overlay_path = str(output_dir / f"{image_path.stem}_trufor_overlay.png")
-            _save_overlay(image_path, anomaly, Path(overlay_path))
+                overlay_path = str(output_dir / f"{image_path.stem}_trufor_overlay.png")
+                _save_overlay(image_path, anomaly, Path(overlay_path))
 
-        if conf is not None:
-            confidence_map_path = str(output_dir / f"{image_path.stem}_trufor_confidence.png")
-            _save_grayscale_map(conf, Path(confidence_map_path))
+            if conf is not None:
+                confidence_map_path = str(output_dir / f"{image_path.stem}_trufor_confidence.png")
+                _save_grayscale_map(conf, Path(confidence_map_path))
 
         flags: list[str] = []
         if score is not None and score >= self.threshold:

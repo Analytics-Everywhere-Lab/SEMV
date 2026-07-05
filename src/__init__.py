@@ -1,1 +1,1 @@
-"""Self-evolving QBAF multimedia verification framework."""
+"""Self-evolving A-QBAF multimedia verification framework."""

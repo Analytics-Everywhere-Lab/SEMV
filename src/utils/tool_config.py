@@ -51,6 +51,8 @@ _DEFAULT_TOOLS_CONFIG: dict[str, Any] = {
         "forensic_external_repo_dir": "external/TruFor/TruFor_train_test",
         "forensic_trufor_weights": "external/TruFor/TruFor_train_test/pretrained_models/trufor.pth.tar",
         "forensic_trufor_experiment": "trufor_ph3",
+        "forensic_trufor_python": "python",
+        "forensic_trufor_timeout_sec": 300,
         "enable_local_reverse_search": True,
         "local_reverse_methods": ["phash", "clip_faiss"],
         "visual_index_dir": "data/visual_index",
@@ -79,6 +81,9 @@ def load_tools_config() -> dict[str, Any]:
     _env_str(media, "forensic_device", "SEMV_FORENSIC_DEVICE")
     _env_str(media, "forensic_external_repo_dir", "SEMV_TRUFOR_REPO_DIR")
     _env_str(media, "forensic_trufor_weights", "SEMV_TRUFOR_WEIGHTS")
+    _env_str(media, "forensic_trufor_python", "SEMV_TRUFOR_PYTHON")
+    _env_str(media, "forensic_trufor_experiment", "SEMV_TRUFOR_EXPERIMENT")
+    _env_int(media, "forensic_trufor_timeout_sec", "SEMV_TRUFOR_TIMEOUT_SEC")
     _env_bool(media, "enable_local_reverse_search", "SEMV_ENABLE_LOCAL_REVERSE")
     _env_bool(retrieval, "free_web_search_enabled", "SEMV_ENABLE_FREE_WEB_SEARCH")
     return config
@@ -110,3 +115,12 @@ def _env_str(target: dict[str, Any], key: str, env_name: str) -> None:
     raw = os.getenv(env_name)
     if raw:
         target[key] = raw
+
+
+def _env_int(target: dict[str, Any], key: str, env_name: str) -> None:
+    raw = os.getenv(env_name)
+    if raw:
+        try:
+            target[key] = int(raw)
+        except ValueError:
+            pass

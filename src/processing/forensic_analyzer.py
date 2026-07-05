@@ -27,8 +27,12 @@ class ForensicAnalyzer:
         if not self.config.get("enable_forensic_adapter", True):
             return [self._uncertainty_item(media.path, "forensic_adapter_disabled")]
         engine = self.config.get("forensic_engine", "basic")
+
         if engine == "disabled":
             return [self._uncertainty_item(media.path, "forensic_adapter_disabled")]
+
+        if engine not in {"basic", "trufor", "deep"}:
+            return [self._uncertainty_item(media.path, f"unknown_forensic_engine:{engine}")]
 
         output_dir.mkdir(parents=True, exist_ok=True)
         targets = [Path(path) for path in visual_targets]
@@ -125,7 +129,7 @@ class ForensicAnalyzer:
         base_dir: Path | None,
         metadata_items: list[EvidenceItem] | None,
     ) -> list[EvidenceItem]:
-        from src.processing.deep_forensics.trufor_backend import TruForBackend
+        from src.processing.deep_forensics.factory import get_deep_forensic_backend
 
         max_targets = int(self.config.get("forensic_max_targets", 8))
         candidates = [target for target in targets if target.exists()][:max_targets]
@@ -134,22 +138,29 @@ class ForensicAnalyzer:
             return [self._uncertainty_item(media.path, "deep_forensic_no_valid_targets")]
 
         try:
-            backend = TruForBackend(self.config)
+            backend = get_deep_forensic_backend(self.config)
             results = backend.analyze_images(candidates, output_dir / "trufor")
         except Exception:
-            if self.config.get("forensic_fallback_to_basic", True):
-                items = self._analyze_basic(
-                    media=media,
-                    targets=candidates,
-                    output_dir=output_dir / "basic_fallback",
-                    base_dir=base_dir,
-                    metadata_items=metadata_items,
-                )
-                for item in items:
-                    item.uncertainty_flags = sorted(set(item.uncertainty_flags) | {"deep_forensic_backend_unavailable"})
-                    item.metadata["deep_forensic_fallback"] = True
-                return items
-            return [self._uncertainty_item(media.path, "deep_forensic_backend_unavailable")]
+            return self._deep_backend_unavailable(
+                media=media,
+                candidates=candidates,
+                output_dir=output_dir,
+                base_dir=base_dir,
+                metadata_items=metadata_items,
+            )
+
+        all_failed = bool(results) and all(
+            result.manipulation_score is None or "deep_forensic_inference_failed" in result.flags
+            for result in results
+        )
+        if all_failed:
+            return self._deep_inference_failed(
+                media=media,
+                candidates=candidates,
+                output_dir=output_dir,
+                base_dir=base_dir,
+                metadata_items=metadata_items,
+            )
 
         scores = [result.manipulation_score for result in results if result.manipulation_score is not None]
         max_score = max(scores) if scores else None
@@ -220,6 +231,65 @@ class ForensicAnalyzer:
                 ),
             )
         ]
+
+    def _deep_backend_unavailable(
+        self,
+        media: MediaItem,
+        candidates: list[Path],
+        output_dir: Path,
+        base_dir: Path | None,
+        metadata_items: list[EvidenceItem] | None,
+    ) -> list[EvidenceItem]:
+        return self._deep_fallback_or_uncertainty(
+            media=media,
+            candidates=candidates,
+            output_dir=output_dir,
+            base_dir=base_dir,
+            metadata_items=metadata_items,
+            flag="deep_forensic_backend_unavailable",
+        )
+
+    def _deep_inference_failed(
+        self,
+        media: MediaItem,
+        candidates: list[Path],
+        output_dir: Path,
+        base_dir: Path | None,
+        metadata_items: list[EvidenceItem] | None,
+    ) -> list[EvidenceItem]:
+        return self._deep_fallback_or_uncertainty(
+            media=media,
+            candidates=candidates,
+            output_dir=output_dir,
+            base_dir=base_dir,
+            metadata_items=metadata_items,
+            flag="deep_forensic_inference_failed",
+        )
+
+    def _deep_fallback_or_uncertainty(
+        self,
+        media: MediaItem,
+        candidates: list[Path],
+        output_dir: Path,
+        base_dir: Path | None,
+        metadata_items: list[EvidenceItem] | None,
+        flag: str,
+    ) -> list[EvidenceItem]:
+        if self.config.get("forensic_fallback_to_basic", True):
+            items = self._analyze_basic(
+                media=media,
+                targets=candidates,
+                output_dir=output_dir / "basic_fallback",
+                base_dir=base_dir,
+                metadata_items=metadata_items,
+            )
+            for item in items:
+                item.uncertainty_flags = sorted(
+                    set(item.uncertainty_flags) | {flag, "deep_forensic_fallback"}
+                )
+                item.metadata["deep_forensic_fallback"] = True
+            return items
+        return [self._uncertainty_item(media.path, flag)]
 
     @staticmethod
     def _metadata_flags(metadata_items: list[EvidenceItem]) -> list[str]:

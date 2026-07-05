@@ -1,1 +1,1 @@
-"""QBAF graph construction and propagation."""
+"""A-QBAF graph construction and propagation."""

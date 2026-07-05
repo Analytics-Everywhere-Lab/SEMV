@@ -146,7 +146,7 @@ def run_case_bundle(
     decision_mapper = DecisionMapper()
 
     logger.info("[5/8] Argument generation")
-    logger.info("[6/8] QBAF reasoning")
+    logger.info("[6/8] A-QBAF reasoning")
     claim_results = _process_claims_parallel(
         claims=claims,
         normalized_evidence=normalized_evidence,

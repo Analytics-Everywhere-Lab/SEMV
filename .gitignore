@@ -10,3 +10,4 @@ data/outputs
 .ipynb_checkpoints
 data/canonical
 .ignore
+external/TruFor/

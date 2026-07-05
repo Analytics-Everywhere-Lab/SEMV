@@ -45,6 +45,8 @@ media:
   forensic_external_repo_dir: "external/TruFor/TruFor_train_test"
   forensic_trufor_weights: "external/TruFor/TruFor_train_test/pretrained_models/trufor.pth.tar"
   forensic_trufor_experiment: "trufor_ph3"
+  forensic_trufor_python: "python"
+  forensic_trufor_timeout_sec: 300
 
   enable_local_reverse_search: true
   local_reverse_methods: ["phash", "clip_faiss"]

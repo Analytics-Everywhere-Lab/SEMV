@@ -1,10 +1,10 @@
-# Self-Evolving Contestable QBAF for Multimedia Verification
+# Self-Evolving Contestable A-QBAF for Multimedia Verification
 
-Reference implementation for a self-evolving, contestable Quantitative Bipolar
-Argumentation Framework (QBAF) for multimedia verification. The system verifies
+Reference implementation for a self-evolving, contestable Arena-based Quantitative Bipolar
+Argumentation Framework (A-QBAF) for multimedia verification. The system verifies
 image, video, and image-caption claims by decomposing them into scoped
 subclaims, collecting multimodal evidence, constructing support and attack
-arguments, propagating argument strength over QBAF graphs, and producing both
+arguments, propagating argument strength over A-QBAF graphs, and producing both
 machine-readable and human-readable verification reports.
 
 The project is designed for research on multimedia verification pipelines that
@@ -31,10 +31,10 @@ For each case, the pipeline performs the following stages:
    reverse-search evidence retrieval while reusing existing media evidence.
 6. Normalize evidence and construct an evidence graph.
 7. Generate, verify, and score support/attack arguments per subclaim.
-8. Build and propagate QBAF graphs, resolving clashes when required.
+8. Build and propagate A-QBAF graphs, resolving clashes when required.
 9. Aggregate subclaim decisions into a final verification label and confidence.
 10. Render structured JSON and Markdown reports with evidence, media analysis,
-    argument, QBAF, uncertainty, and memory traces.
+    argument, A-QBAF, uncertainty, and memory traces.
 11. Optionally reflect after prediction to produce verified memory-update
     candidates.
 
@@ -46,7 +46,7 @@ post-prediction in self-evolving or bootstrap-memory modes.
 SEMV is intended to support contestable verification rather than a closed
 one-shot prediction. The human reviewer does not need to directly edit every
 internal pipeline artifact. Instead, the contestation interface is centered on
-arguments, because arguments are the bridge between evidence, subclaims, QBAF
+arguments, because arguments are the bridge between evidence, subclaims, A-QBAF
 reasoning, and the final decision.
 
 The recommended reviewer action space is deliberately small:
@@ -150,7 +150,7 @@ src/ingestion/            Dataset adapters and canonical bundle writer
 src/memory/               Memory retrieval, verification, consolidation, seeding
 src/planning/             Claim decomposition and research planning
 src/processing/           Media loading, metadata, OCR, ASR, VLM, forensics, keyframes
-src/qbaf/                 QBAF graph construction, propagation, decision mapping
+src/A-QBAF/                 A-QBAF graph construction, propagation, decision mapping
 src/reflection/           Failure analysis and memory-update candidate generation
 src/reporting/            JSON and Markdown report rendering
 tests/                    Unit and integration tests
@@ -288,6 +288,81 @@ SEMV_ENABLE_LOCAL_REVERSE=true
 SEMV_ENABLE_FREE_WEB_SEARCH=false
 ```
 
+## Deep Forensics / TruFor Setup
+
+`ForensicAnalyzer` supports two forensic engines, selected by `forensic_engine`
+(`configs/tools.yaml`) or `SEMV_FORENSIC_ENGINE`:
+
+- `basic` (default): no extra install required. Runs the built-in ELA, noise,
+  blur, and metadata-flag heuristics entirely inside SEMV.
+- `trufor` / `deep`: runs a pluggable deep-forensics backend
+  (`src/processing/deep_forensics/`) that produces a pixel-level anomaly map,
+  a confidence map, and a whole-image manipulation score. The default backend
+  is [TruFor](https://github.com/grip-unina/TruFor), selected via
+  `forensic_deep_backend` (`SEMV_FORENSIC_DEEP_BACKEND`, default `trufor`).
+
+Using `basic` needs no additional setup. Using `trufor` requires installing
+TruFor separately, since it is not a pip-installable package and ships its own
+heavy dependency stack (its own PyTorch/CUDA environment):
+
+```bash
+mkdir -p external
+git clone https://github.com/grip-unina/TruFor.git external/TruFor
+cd external/TruFor/TruFor_train_test
+conda env create -f trufor_conda.yaml
+conda activate trufor
+```
+
+Then download the TruFor pretrained weights and place them at:
+
+```text
+external/TruFor/TruFor_train_test/pretrained_models/trufor.pth.tar
+```
+
+Run SEMV with deep forensics enabled:
+
+```env
+SEMV_ENABLE_FORENSICS=true
+SEMV_FORENSIC_ENGINE=trufor
+SEMV_FORENSIC_DEEP_BACKEND=trufor
+SEMV_TRUFOR_REPO_DIR=external/TruFor/TruFor_train_test
+SEMV_TRUFOR_WEIGHTS=external/TruFor/TruFor_train_test/pretrained_models/trufor.pth.tar
+# Optional: point at the interpreter inside the TruFor conda env, since it has
+# a separate dependency stack from the rest of SEMV.
+SEMV_TRUFOR_PYTHON=/path/to/miniconda3/envs/trufor/bin/python
+SEMV_TRUFOR_TIMEOUT_SEC=300
+SEMV_TRUFOR_EXPERIMENT=trufor_ph3
+```
+
+SEMV invokes TruFor's own `test.py` as a subprocess (not a direct Python
+import), so the TruFor environment does not need to match SEMV's environment
+as long as `SEMV_TRUFOR_PYTHON` points at an interpreter that can run it.
+
+Additional forensic tuning keys in `configs/tools.yaml`:
+
+```yaml
+media:
+  forensic_max_targets: 8
+  forensic_manipulation_threshold: 0.50
+  forensic_min_confidence: 0.30
+  forensic_save_maps: true
+  forensic_fallback_to_basic: true
+```
+
+`forensic_save_maps: false` skips writing anomaly/confidence/overlay PNGs to
+disk while still computing and reporting the manipulation score and map
+statistics. `forensic_fallback_to_basic` controls what happens if the TruFor
+repo, weights, or subprocess call are unavailable or fail on every target: if
+`true`, SEMV falls back to the `basic` engine and tags the resulting evidence
+with `deep_forensic_backend_unavailable` / `deep_forensic_inference_failed`
+and `deep_forensic_fallback`; if `false`, SEMV returns a `synthetic_uncertainty`
+evidence item with the same flag instead of silently degrading.
+
+**Without `external/TruFor` cloned and real weights downloaded, `trufor` engine
+runs will not find the repo/weights and SEMV falls back to basic forensics**
+(or returns a `synthetic_uncertainty` item if fallback is disabled) — this is
+expected until TruFor is installed as described above.
+
 ## Parallel Execution
 
 The pipeline can parallelize expensive per-subclaim work. Two environment
@@ -301,7 +376,7 @@ SEMV_MAX_WORKERS=2
 
 `SEMV_PARALLEL_DEEP_RESEARCH` parallelizes deep-research calls across subclaims.
 `SEMV_PARALLEL_CLAIMS` parallelizes argument generation, verification, scoring,
-QBAF construction, and decision mapping across subclaims. `SEMV_MAX_WORKERS`
+A-QBAF construction, and decision mapping across subclaims. `SEMV_MAX_WORKERS`
 limits both parallel sections so local LLM and tool backends are not overloaded.
 
 ## Input Format
@@ -566,7 +641,7 @@ pytest
 ```
 
 The test suite covers case-bundle schemas, ingestion adapters, leakage guards,
-claim decomposition, QBAF propagation and scoring, memory retrieval/update
+claim decomposition, A-QBAF propagation and scoring, memory retrieval/update
 behavior, temporal and geolocation metrics, evaluation adapters, media-derived
 evidence handling, and end-to-end report generation.
 
