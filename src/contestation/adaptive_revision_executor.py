@@ -143,6 +143,53 @@ def rerun_argument_stage_for_claims(
     return regenerated
 
 
+def verify_and_score_human_reviewed_arguments(
+    *,
+    reviewed_arguments: list[Argument],
+    affected_claims: list[SubClaim],
+    normalized_evidence: list[EvidenceItem],
+    evidence_graph: EvidenceGraph,
+    bundle: CaseBundle,
+    llm_client: LLMClient,
+) -> list[Argument]:
+    affected_claim_ids = {claim.claim_id for claim in affected_claims}
+    claims_by_id = {claim.claim_id: claim for claim in affected_claims}
+
+    argument_verifier = ArgumentVerifier(llm_client=llm_client)
+    argument_scorer = ArgumentScorer(llm_client=llm_client)
+
+    to_revalidate_by_claim: dict[str, list[Argument]] = {}
+    passthrough: list[Argument] = []
+    for argument in reviewed_arguments:
+        if (
+            argument.claim_id in affected_claim_ids
+            and argument.human_status in {"accepted", "edited", "added"}
+        ):
+            to_revalidate_by_claim.setdefault(argument.claim_id, []).append(argument)
+        else:
+            passthrough.append(argument)
+
+    revalidated: list[Argument] = []
+    for claim_id, arguments in to_revalidate_by_claim.items():
+        claim = claims_by_id[claim_id]
+        verified = argument_verifier.verify_all(
+            claim=claim,
+            arguments=arguments,
+            evidence=normalized_evidence,
+            bundle=bundle,
+        )
+        scored = argument_scorer.score_all(
+            claim=claim,
+            arguments=verified,
+            evidence=normalized_evidence,
+            evidence_graph=evidence_graph,
+            bundle=bundle,
+        )
+        revalidated.extend(scored)
+
+    return [*passthrough, *revalidated]
+
+
 def _attach_argument_provenance(
     argument: Argument,
     claim: SubClaim,
@@ -259,6 +306,15 @@ def execute_adaptive_revision(
         affected_claim_ids = affected_claim_ids_from_plan(revision_plan, reviewed_arguments, all_claim_ids)
         affected_claims = [claims_by_id[claim_id] for claim_id in affected_claim_ids if claim_id in claims_by_id]
 
+        revalidated_reviewed_arguments = verify_and_score_human_reviewed_arguments(
+            reviewed_arguments=reviewed_arguments,
+            affected_claims=affected_claims,
+            normalized_evidence=normalized_evidence,
+            evidence_graph=evidence_graph,
+            bundle=bundle,
+            llm_client=llm_client,
+        )
+
         logger.info("Regenerating arguments for affected subclaims only")
         regenerated = rerun_argument_stage_for_claims(
             affected_claims=affected_claims,
@@ -272,7 +328,7 @@ def execute_adaptive_revision(
         )
         merged_arguments = merge_arguments_after_rerun(
             old_arguments=original_arguments,
-            reviewed_arguments=reviewed_arguments,
+            reviewed_arguments=revalidated_reviewed_arguments,
             regenerated_arguments=regenerated,
             affected_claim_ids=affected_claim_ids,
         )
@@ -299,6 +355,15 @@ def execute_adaptive_revision(
         re_normalized_evidence = EvidenceNormalizer().normalize(all_evidence)
         re_evidence_graph = EvidenceGraphBuilder().build(re_normalized_evidence, claims)
 
+        revalidated_reviewed_arguments = verify_and_score_human_reviewed_arguments(
+            reviewed_arguments=reviewed_arguments,
+            affected_claims=affected_claims,
+            normalized_evidence=re_normalized_evidence,
+            evidence_graph=re_evidence_graph,
+            bundle=bundle,
+            llm_client=llm_client,
+        )
+
         logger.info("Regenerating arguments for affected subclaims only")
         regenerated = rerun_argument_stage_for_claims(
             affected_claims=affected_claims,
@@ -312,7 +377,7 @@ def execute_adaptive_revision(
         )
         merged_arguments = merge_arguments_after_rerun(
             old_arguments=original_arguments,
-            reviewed_arguments=reviewed_arguments,
+            reviewed_arguments=revalidated_reviewed_arguments,
             regenerated_arguments=regenerated,
             affected_claim_ids=affected_claim_ids,
         )
@@ -339,28 +404,30 @@ def execute_adaptive_revision(
         logger.info("Rerunning retrieval for affected subclaims only")
         researcher = DeepResearcher(llm_client=llm_client)
         safe_research_plans = _ensure_research_plans(research_plans, affected_claims, legacy_case, llm_client)
-        new_evidence = _research_claims_parallel(
-            researcher=researcher,
-            claims=affected_claims,
-            research_plans=safe_research_plans,
-            existing_evidence=all_evidence,
-        )
-        new_evidence = [
-            item.model_copy(
-                update={
-                    "metadata": {
-                        **item.metadata,
-                        "retrieval_rerun": True,
-                        "revision_plan_rationale": revision_plan.rationale,
-                    }
-                }
+        new_evidence: list[EvidenceItem] = []
+        for claim in affected_claims:
+            claim_new_evidence = _research_claims_parallel(
+                researcher=researcher,
+                claims=[claim],
+                research_plans=safe_research_plans,
+                existing_evidence=all_evidence,
             )
-            for item in new_evidence
-        ]
+            new_evidence.extend(
+                _tag_evidence_for_retrieval_rerun(claim_new_evidence, claim.claim_id, revision_plan)
+            )
         merged_evidence = _merge_dedup_evidence(all_evidence, new_evidence)
 
         re_normalized_evidence = EvidenceNormalizer().normalize(merged_evidence)
         re_evidence_graph = EvidenceGraphBuilder().build(re_normalized_evidence, claims)
+
+        revalidated_reviewed_arguments = verify_and_score_human_reviewed_arguments(
+            reviewed_arguments=reviewed_arguments,
+            affected_claims=affected_claims,
+            normalized_evidence=re_normalized_evidence,
+            evidence_graph=re_evidence_graph,
+            bundle=bundle,
+            llm_client=llm_client,
+        )
 
         logger.info("Regenerating arguments for affected subclaims only")
         regenerated = rerun_argument_stage_for_claims(
@@ -375,7 +442,7 @@ def execute_adaptive_revision(
         )
         merged_arguments = merge_arguments_after_rerun(
             old_arguments=original_arguments,
-            reviewed_arguments=reviewed_arguments,
+            reviewed_arguments=revalidated_reviewed_arguments,
             regenerated_arguments=regenerated,
             affected_claim_ids=affected_claim_ids,
         )

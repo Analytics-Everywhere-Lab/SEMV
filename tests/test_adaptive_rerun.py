@@ -249,3 +249,37 @@ def test_human_added_argument_is_verified_and_scored():
     added = [arg for arg in all_args if arg.human_status == "added"]
     assert added, "human-added argument should remain present in the final arguments"
     assert added[0].score is not None
+    assert added[0].verification_notes is not None
+    assert added[0].case_id == "case_1"
+    assert added[0].strength_components
+    assert added[0].metadata.get("human_added") is True
+
+
+def test_human_edited_argument_is_verified_and_rescored(monkeypatch):
+    def _no_research(self, claim, plan, existing_evidence):
+        return []
+
+    monkeypatch.setattr(DeepResearcher, "research", _no_research)
+
+    trace = _two_claim_trace()
+    batch = HumanReviewBatch(
+        case_id="case_1",
+        contestations=[
+            HumanArgumentContestation(
+                contestation_id="c1",
+                case_id="case_1",
+                action="edit",
+                target_argument_id="arg_1",
+                edited_text="A more precise and carefully worded version of the argument.",
+            )
+        ],
+    )
+
+    report = run_from_step(_two_claim_bundle(), "argument_construction", previous_state=trace, human_review_batch=batch, llm_client=FakeLLMClient())
+
+    subclaim_1_report = next(r for r in report.subclaim_reports if r.claim_id == "subclaim_1")
+    all_args = [*subclaim_1_report.top_support_arguments, *subclaim_1_report.top_attack_arguments]
+    edited = [arg for arg in all_args if arg.human_status == "edited" and arg.human_original_argument_id]
+    assert edited, "human-edited replacement argument should remain present in the final arguments"
+    assert edited[0].verification_notes is not None
+    assert edited[0].strength_components

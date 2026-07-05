@@ -93,6 +93,10 @@ def route_revision(
 
 
 def _target_for_contestation(contestation, arguments_by_id, existing_evidence_ids) -> RevisionTarget:
+    explicit_target = contestation.metadata.get("revision_target")
+    if explicit_target in STEP_ORDER:
+        return explicit_target
+
     reason = (contestation.reason or "").lower()
     if contestation.action == "accept":
         return "qbaf_reasoning"

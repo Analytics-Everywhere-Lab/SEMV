@@ -42,3 +42,29 @@ def test_multiple_contestations_choose_earliest_step():
         HumanArgumentContestation(contestation_id="c2", case_id="case_1", action="reject", target_argument_id="arg_1", reason="retrieval error returned the wrong source"),
     ])
     assert route_revision(batch, case_trace=_trace()).rerun_from_step == "evidence_retrieval"
+
+
+def test_explicit_revision_target_metadata_overrides_inference():
+    batch = HumanReviewBatch(case_id="case_1", contestations=[
+        HumanArgumentContestation(
+            contestation_id="c1",
+            case_id="case_1",
+            action="accept",
+            target_argument_id="arg_1",
+            metadata={"revision_target": "evidence_retrieval"},
+        ),
+    ])
+    assert route_revision(batch, case_trace=_trace()).rerun_from_step == "evidence_retrieval"
+
+
+def test_invalid_revision_target_metadata_falls_back_to_inference():
+    batch = HumanReviewBatch(case_id="case_1", contestations=[
+        HumanArgumentContestation(
+            contestation_id="c1",
+            case_id="case_1",
+            action="accept",
+            target_argument_id="arg_1",
+            metadata={"revision_target": "not_a_real_step"},
+        ),
+    ])
+    assert route_revision(batch, case_trace=_trace()).rerun_from_step == "qbaf_reasoning"

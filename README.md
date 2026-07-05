@@ -60,31 +60,36 @@ The recommended reviewer action space is deliberately small:
 
 A reviewer should normally inspect all generated arguments in one batch. This
 keeps the human workflow simple while still allowing the framework to infer
-where revision is needed. Each action can include a `revision_target` metadata
-field telling the system which stage should be revisited.
+where revision is needed from the action type and the free-text `reason`.
+Each contestation can also include an explicit `metadata.revision_target`
+field to force which stage should be revisited, overriding the inferred
+routing.
 
-Suggested `revision_target` values are:
+Valid `revision_target` / `rerun_from_step` values (see
+`src/schemas/contestation_schema.py::RevisionTarget`) are:
 
 ```text
 claim_decomposition
-media_processing
-retrieval
-evidence_normalization
-argument_generation
-argument_verification
-argument_scoring
-qbaf_propagation
+evidence_retrieval
+evidence_validation
+argument_construction
+qbaf_reasoning
 final_aggregation
-reporting
+report_generation
 ```
 
 This makes the contestation mechanism adaptive. For example, rejecting an
-argument because the retrieved source does not actually support the claim should
-send the pipeline back to `retrieval`, not merely rescore the argument. Editing
-an argument's stance should restart from `argument_verification` or
-`argument_scoring`. Adding a missing counterargument can restart from
-`qbaf_propagation` if the evidence is already present, or from `retrieval` if new
-evidence is required.
+argument because the retrieved source does not actually support the claim
+sends the pipeline back to `evidence_retrieval`, not merely rescore the
+argument. Rejecting an argument because the evidence itself does not support
+the claim (wrong date, wrong location, wrong entity, irrelevant source)
+restarts from `evidence_validation`. Editing an argument's wording or adding a
+new argument backed by existing evidence restarts from
+`argument_construction`. Accepting an argument, or rejecting/editing it for
+reasons unrelated to evidence, only reruns `qbaf_reasoning` and the final
+report. See `src/contestation/revision_router.py` and
+`src/contestation/adaptive_revision_executor.py` for the full routing and
+rerun implementation.
 
 A typical feedback file can use the following shape:
 
@@ -92,29 +97,31 @@ A typical feedback file can use the following shape:
 {
   "case_id": "ID333",
   "reviewer_id": "human_1",
-  "review_scope": "all_arguments",
-  "actions": [
+  "contestations": [
     {
+      "contestation_id": "c1",
+      "case_id": "ID333",
       "action": "reject",
-      "argument_id": "arg_where_002",
-      "reason": "The cited source describes a similar scene but not the claimed location.",
-      "revision_target": "retrieval"
+      "target_argument_id": "arg_where_002",
+      "reason": "The cited source describes a similar scene but not the claimed location."
     },
     {
+      "contestation_id": "c2",
+      "case_id": "ID333",
       "action": "edit",
-      "argument_id": "arg_when_001",
-      "revised_text": "The evidence supports that the video was online by the publication date, but not the exact recording date.",
-      "stance": "attack",
-      "score_hint": 0.72,
-      "revision_target": "argument_scoring"
+      "target_argument_id": "arg_when_001",
+      "edited_text": "The evidence supports that the video was online by the publication date, but not the exact recording date.",
+      "edited_stance": "attack",
+      "edited_confidence": 0.72
     },
     {
+      "contestation_id": "c3",
+      "case_id": "ID333",
       "action": "add",
-      "claim_id": "authenticity_1",
-      "stance": "support",
-      "text": "No visible editing artifacts are reported by the available forensic evidence.",
-      "evidence_ids": ["ev_forensic_001"],
-      "revision_target": "qbaf_propagation"
+      "added_subclaim_id": "authenticity_1",
+      "added_stance": "support",
+      "added_text": "No visible editing artifacts are reported by the available forensic evidence.",
+      "added_evidence_ids": ["ev_forensic_001"]
     }
   ]
 }
@@ -130,9 +137,10 @@ The current codebase already contains the main contestability hooks:
   place to preserve human feedback during reflection.
 - `report.md` includes a contestation-log section.
 - `--human-feedback-json` is accepted by `scripts/run_case.py` as an alias for
-- `--human_review_path` and is passed into `run_case_bundle`, which applies the
-contestation batch and writes the before/after contestation artifacts alongside
-the final report.
+- `--human_review_path` and is passed into `run_case_bundle`, which routes the
+contestation batch via `route_revision`, reruns only the affected pipeline
+stage and its downstream steps via `execute_adaptive_revision`, and writes the
+before/after contestation artifacts alongside the final report.
 
 ## Repository Layout
 
