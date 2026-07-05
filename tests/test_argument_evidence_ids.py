@@ -33,3 +33,62 @@ def test_contestability_is_present():
     argument = ArgumentGenerator(llm).generate(claim, evidence, EvidenceGraph(), [])[0]
     assert argument.contestability["can_reject"] is True
     assert argument.provenance_summary
+
+
+class RaisingLLM:
+    def generate_json(self, prompt, **kwargs):
+        raise RuntimeError("llm unavailable")
+
+
+def test_fallback_tool_missing_uncertainty_is_neutral_not_attack():
+    evidence = [
+        EvidenceItem(
+            evidence_id="unc1",
+            source_type="synthetic_uncertainty",
+            source="metadata",
+            title="ExifTool metadata unavailable",
+            content="ExifTool metadata unavailable; adapter did not run.",
+            reliability=0.25,
+            relevance=0.45,
+            uncertainty_flags=["exiftool_missing"],
+        )
+    ]
+    claim = SubClaim(claim_id="c1", claim_type="authenticity", statement="authentic?")
+    arguments = ArgumentGenerator(RaisingLLM()).generate(claim, evidence, EvidenceGraph(), [])
+    assert arguments[0].stance == "neutral"
+
+
+def test_fallback_weak_metadata_flags_are_neutral_not_attack():
+    evidence = [
+        EvidenceItem(
+            evidence_id="meta1",
+            source_type="metadata_exiftool",
+            source="exiftool",
+            title="Image metadata",
+            content="Metadata inspection for image.jpg.",
+            reliability=0.6,
+            relevance=0.5,
+            uncertainty_flags=["gps_missing", "creation_time_missing"],
+        )
+    ]
+    claim = SubClaim(claim_id="c1", claim_type="where", statement="location claim")
+    arguments = ArgumentGenerator(RaisingLLM()).generate(claim, evidence, EvidenceGraph(), [])
+    assert arguments[0].stance == "neutral"
+
+
+def test_fallback_suspicious_forensic_flag_is_still_attack():
+    evidence = [
+        EvidenceItem(
+            evidence_id="forensic1",
+            source_type="metadata_exiftool",
+            source="exiftool",
+            title="Suspicious software tag",
+            content="Metadata software tag indicates editing software.",
+            reliability=0.6,
+            relevance=0.5,
+            uncertainty_flags=["software_tag_suspicious"],
+        )
+    ]
+    claim = SubClaim(claim_id="c1", claim_type="authenticity", statement="authentic?")
+    arguments = ArgumentGenerator(RaisingLLM()).generate(claim, evidence, EvidenceGraph(), [])
+    assert arguments[0].stance == "attack"

@@ -18,6 +18,39 @@ DEFAULT_STRENGTH_WEIGHTS = {
     "claim_relevance": 0.15,
 }
 
+# Flags that only signal a tool/adapter didn't run or data was absent — not
+# evidence of manipulation. Anything else (e.g. software_tag_suspicious,
+# metadata_stripped, black_border_or_recapture_cue) is a real detected signal
+# and should still be able to drive an "attack" stance.
+NEUTRAL_ONLY_FLAG_PREFIXES = (
+    "exiftool_missing",
+    "ffprobe_missing",
+    "metadata_missing",
+    "metadata_json_parse_failed",
+    "metadata_tool_failed",
+    "gps_missing",
+    "creation_time_missing",
+    "media_file_missing",
+    "forensic_media_missing",
+    "forensic_image_unreadable",
+    "trufor_adapter_unavailable",
+    "asr_media_missing",
+    "vlm_media_missing",
+    "ocr_media_missing",
+    "ocr_adapter_unavailable",
+    "local_reverse_search_disabled",
+    "local_reverse_query_missing",
+    "local_reverse_search_failed",
+    "free_web_search_unavailable",
+    "free_web_search_failed",
+    "video_keyframes_unavailable",
+    "external_research_cache_miss",
+)
+
+
+def _is_neutral_only_flag(flag: str) -> bool:
+    return any(flag == prefix or flag.startswith(f"{prefix}:") for prefix in NEUTRAL_ONLY_FLAG_PREFIXES)
+
 
 def _argument_provenance(claim: SubClaim, evidence_ids: list[str]) -> ArgumentProvenance:
     return ArgumentProvenance(
@@ -144,10 +177,23 @@ class ArgumentGenerator:
         metadata_stance = item.metadata.get("stance")
         if metadata_stance in {"support", "attack", "mixed", "neutral"}:
             return metadata_stance
+
+        # Evidence items produced when a tool/adapter didn't run at all
+        # (source_type="synthetic_uncertainty") are never attack signals.
+        if item.source_type == "synthetic_uncertainty":
+            return "neutral"
+
         text = item.content.lower()
         attack_terms = ["false", "misleading", "not ", "unrelated", "different", "old", "out of context"]
-        if any(term in text for term in attack_terms) or item.uncertainty_flags:
+        if any(term in text for term in attack_terms):
             return "attack"
+
+        flags = item.uncertainty_flags or []
+        if flags:
+            if all(_is_neutral_only_flag(flag) for flag in flags):
+                return "neutral"
+            return "attack"
+
         return "support"
 
     @staticmethod
