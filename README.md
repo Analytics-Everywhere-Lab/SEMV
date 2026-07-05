@@ -235,29 +235,6 @@ SEMV_ENABLE_LOCAL_REVERSE=true
 SEMV_ENABLE_FREE_WEB_SEARCH=false
 ```
 
-If optional binaries, models, or local services are missing, adapters should emit
-synthetic uncertainty evidence instead of crashing. For full local capability,
-install FFmpeg/FFprobe for video and audio processing, ExifTool for richer
-metadata extraction, EasyOCR model dependencies for OCR, faster-whisper models
-for ASR, and an Ollama multimodal model such as `llava` for VLM-based visual
-observation. The project implements local pHash plus optional CLIP/FAISS visual
-similarity; it does not claim official Google Lens, Yandex, or TinEye reverse
-image search integration. Forensics are basic heuristics unless a learned model
-is explicitly configured.
-
-| Component | Implemented | Default | Dependency | Notes |
-|---|---:|---:|---|---|
-| Metadata | yes | on | Pillow, ffprobe, exiftool optional | graceful fallback |
-| Keyframes | yes | on | ffmpeg, PySceneDetect optional | scene detection with uniform fallback |
-| OCR | yes | configurable | EasyOCR | optional, emits uncertainty if unavailable |
-| ASR | yes | configurable | faster-whisper, ffmpeg | optional, video only |
-| VLM | yes | configurable | Ollama LLaVA or equivalent | VLM-based visual observation, not ground truth |
-| Forensics | basic | on | Pillow/OpenCV | heuristic only |
-| Local reverse | yes | on | pHash, optional OpenCLIP/FAISS | local/cached only |
-| Web reverse candidate | yes | off unless free web enabled | web search + image compare | not Google Lens |
-| Geolocation | partial | configurable | optional cached Nominatim | GPS/clue extraction offline first |
-| Escalation | yes | on | none | score/conflict based |
-
 ## Parallel Execution
 
 The pipeline can parallelize expensive per-subclaim work. Two environment

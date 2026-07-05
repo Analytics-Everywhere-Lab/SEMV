@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from src.processing.asr_extractor import ASRExtractor
@@ -13,6 +14,8 @@ from src.schemas.case_schema import MediaItem, MultimediaCase
 from src.schemas.evidence_schema import EvidenceItem
 from src.utils.io import project_root
 from src.utils.tool_config import load_tools_config, media_config
+
+logger = logging.getLogger("run_case")
 
 
 class RawMediaProcessor:
@@ -31,11 +34,21 @@ class RawMediaProcessor:
     def process(self, case: MultimediaCase, case_path: Path | None = None) -> list[EvidenceItem]:
         base_dir = case_path.parent if case_path else project_root()
         evidence: list[EvidenceItem] = []
+        logger.info("OCR enabled=%s", self.media_config.get("enable_ocr_adapter", True))
+        logger.info("ASR enabled=%s", self.media_config.get("enable_asr_adapter", True))
+        logger.info("VLM enabled=%s", self.media_config.get("enable_vlm_adapter", True))
+        logger.info("Forensics enabled=%s", self.media_config.get("enable_forensic_adapter", True))
+        logger.info(
+            "Local reverse search enabled=%s",
+            self.media_config.get("enable_local_reverse_search", True),
+        )
         for idx, media in enumerate(case.media):
+            logger.info("Processing media %s (%s)", media.path, media.media_type)
             media_output_dir = self.output_dir / case.case_id / f"media_{idx}"
 
             metadata_items = self.metadata_extractor.extract(media, base_dir=base_dir)
             evidence.extend(metadata_items)
+            logger.info("Metadata extraction done: %d evidence items", len(metadata_items))
 
             keyframe_items: list[EvidenceItem] = []
             if media.media_type == "video" and self.media_config.get("enable_ffmpeg_keyframes", True):
@@ -48,6 +61,7 @@ class RawMediaProcessor:
                     deduplicate=bool(self.media_config.get("deduplicate_keyframes", True)),
                 )
                 evidence.extend(keyframe_items)
+                logger.info("Keyframe extraction done: %d evidence items", len(keyframe_items))
 
             visual_targets: list[Path] = []
             if media.media_type == "image":

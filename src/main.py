@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -48,6 +49,8 @@ from src.utils.io import project_root, read_json, write_json
 from src.utils.llm_client import LLMClient, OllamaLLMClient
 
 
+logger = logging.getLogger("run_case")
+
 RunMode = Literal["inference_only", "self_evolving", "test", "bootstrap_memory"]
 LegacyRunMode = Literal["inference_only", "self_evolving"]
 
@@ -72,9 +75,11 @@ def run_case_bundle(
     shared_llm_client = llm_client or OllamaLLMClient()
     legacy_case = case_bundle_to_multimedia_case(bundle)
 
+    logger.info("[1/8] Raw media processing")
     raw_evidence = RawMediaProcessor().process(legacy_case, case_path=case_path)
     raw_evidence.extend(legacy_case.provided_evidence)
 
+    logger.info("[3/8] Claim decomposition")
     claims = _claims_from_bundle(bundle)
     if not claims:
         claims = ClaimDecomposer(llm_client=shared_llm_client).decompose(
@@ -113,6 +118,7 @@ def run_case_bundle(
 
     all_evidence = list(raw_evidence)
     if bundle.run_config.allow_web_search or bundle.run_config.allow_reverse_search:
+        logger.info("[4/8] Deep research")
         researcher = DeepResearcher(llm_client=shared_llm_client)
         existing_evidence_snapshot = list(all_evidence)
         research_results = _research_claims_parallel(
@@ -123,6 +129,7 @@ def run_case_bundle(
         )
         all_evidence = _merge_dedup_evidence(all_evidence, research_results)
 
+    logger.info("[2/8] Evidence normalization")
     normalized_evidence = EvidenceNormalizer().normalize(all_evidence)
     evidence_graph = EvidenceGraphBuilder().build(normalized_evidence, claims)
 
@@ -138,6 +145,8 @@ def run_case_bundle(
     clash_resolver = ClashResolver(llm_client=shared_llm_client)
     decision_mapper = DecisionMapper()
 
+    logger.info("[5/8] Argument generation")
+    logger.info("[6/8] QBAF reasoning")
     claim_results = _process_claims_parallel(
         claims=claims,
         normalized_evidence=normalized_evidence,
@@ -164,6 +173,8 @@ def run_case_bundle(
         bundle=bundle,
     )
     memory_used = _flatten_memory(memory_by_claim.values())
+    logger.info("[7/8] Uncertainty escalation")
+    logger.info("[8/8] Report rendering")
     report = ReportGenerator(llm_client=shared_llm_client).generate(
         case=legacy_case,
         final_status=final_status,

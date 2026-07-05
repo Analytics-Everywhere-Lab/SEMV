@@ -39,6 +39,9 @@ class LLMClient(Protocol):
         ...
 
 
+logger = logging.getLogger("run_case")
+
+
 class OllamaLLMClient:
     """Shared Ollama client used by all agent-like pipeline components."""
 
@@ -69,12 +72,21 @@ class OllamaLLMClient:
         }
         if response_format is not None:
             payload["format"] = response_format
-        response = requests.post(
-            f"{self.base_url}/api/generate",
-            json=payload,
-            timeout=kwargs.pop("timeout", self.timeout),
-        )
+        timeout = kwargs.pop("timeout", self.timeout)
+        logger.info("Calling Ollama model=%s timeout=%s", self.model, timeout)
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=timeout,
+            )
+        except requests.exceptions.Timeout as exc:
+            raise RuntimeError(
+                f"Ollama call timed out after {timeout}s. "
+                "Check that Ollama is running and the configured model is pulled."
+            ) from exc
         response.raise_for_status()
+        logger.info("Ollama response received")
         return str(response.json().get("response", "")).strip()
 
     def generate_with_images(
@@ -98,12 +110,21 @@ class OllamaLLMClient:
             "images": [_encode_image(path) for path in image_paths],
             "options": options,
         }
-        response = requests.post(
-            f"{self.base_url}/api/generate",
-            json=payload,
-            timeout=kwargs.pop("timeout", self.timeout),
-        )
+        timeout = kwargs.pop("timeout", self.timeout)
+        logger.info("Calling Ollama model=%s timeout=%s", self.model, timeout)
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=timeout,
+            )
+        except requests.exceptions.Timeout as exc:
+            raise RuntimeError(
+                f"Ollama call timed out after {timeout}s. "
+                "Check that Ollama is running and the configured model is pulled."
+            ) from exc
         response.raise_for_status()
+        logger.info("Ollama response received")
         return str(response.json().get("response", "")).strip()
 
     def generate_text(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> str:
