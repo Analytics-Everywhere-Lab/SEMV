@@ -288,6 +288,92 @@ SEMV_ENABLE_LOCAL_REVERSE=true
 SEMV_ENABLE_FREE_WEB_SEARCH=false
 ```
 
+### Optional GDELT live news retrieval
+
+SEMV can optionally query [GDELT DOC 2.0](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/)
+for live news-style evidence. It runs as a separate retrieval step in
+`DeepResearcher`, after cached/manual evidence and before the DuckDuckGo-backed
+`FreeWebSearch` fallback:
+
+```text
+1. Existing case/manual/cached evidence
+2. Existing local/cached adapters
+3. GDELT live news search
+4. DuckDuckGo free web search fallback
+5. Synthetic uncertainty item if nothing is found
+```
+
+It is disabled by default and does not replace `FreeWebSearch`. Enable it with:
+
+```bash
+SEMV_ENABLE_GDELT_SEARCH=true \
+python scripts/run_case.py ...
+```
+
+Relevant flags in `configs/tools.yaml` (`retrieval:` section):
+
+```yaml
+  gdelt_search_enabled: false
+  gdelt_base_url: "https://api.gdeltproject.org/api/v2/doc/doc"
+  gdelt_max_records_per_claim: 8
+  gdelt_max_queries_per_claim: 4
+  gdelt_timespan: "3months"
+  gdelt_source_lang: "eng"
+  gdelt_cache_enabled: true
+  gdelt_cache_path: "data/cache/gdelt_search_cache.json"
+  gdelt_min_interval_sec: 12
+  gdelt_max_retries: 3
+  gdelt_backoff_base_sec: 20
+  gdelt_circuit_breaker_cooldown_sec: 300
+```
+
+Environment overrides:
+
+```env
+SEMV_ENABLE_GDELT_SEARCH=true
+SEMV_GDELT_TIMESPAN=3months
+SEMV_GDELT_SOURCE_LANG=eng
+SEMV_GDELT_MAX_QUERIES_PER_CLAIM=1
+SEMV_GDELT_MAX_RECORDS_PER_CLAIM=3
+SEMV_GDELT_MIN_INTERVAL_SEC=12
+SEMV_GDELT_MAX_RETRIES=3
+SEMV_GDELT_BACKOFF_BASE_SEC=20
+```
+
+Results are represented as `EvidenceItem(source_type="news_article")` with
+`provenance.retrieval_method="gdelt_doc_api_artlist"`, preserving article URL,
+title, domain, language, source country, and seen date. Responses are cached
+in `data/cache/gdelt_search_cache.json`; for reproducible evaluation, run once
+with GDELT enabled to populate the cache, then keep the cache fixed for
+benchmark reporting.
+
+**Rate limiting and 429 handling.** GDELT throttles the DOC API aggressively,
+so SEMV protects itself in a few layers:
+
+- **Query quality filter**: generic single-concept queries (`location`,
+  `where`, `image`, `event`, ...) or queries with fewer than two meaningful
+  tokens are never sent to GDELT. If no specific, entity/event-rich query can
+  be built for a claim, GDELT is skipped entirely for that claim and
+  cached/local/DuckDuckGo retrieval still runs.
+- **Per-instance rate limiting**: consecutive live requests are spaced at
+  least `gdelt_min_interval_sec` apart (default 12s).
+- **Retry with backoff**: on `HTTP 429`, SEMV retries up to
+  `gdelt_max_retries` times, honoring the `Retry-After` header when present or
+  falling back to exponential backoff (`gdelt_backoff_base_sec * 2^attempt`).
+- **Circuit breaker**: if retries are exhausted while still rate-limited,
+  GDELT is disabled for `gdelt_circuit_breaker_cooldown_sec` (default 300s)
+  for the rest of the run; other retrieval sources are unaffected.
+
+For a conservative first run, start with:
+
+```bash
+SEMV_ENABLE_GDELT_SEARCH=true \
+SEMV_GDELT_MAX_QUERIES_PER_CLAIM=1 \
+SEMV_GDELT_MAX_RECORDS_PER_CLAIM=3 \
+SEMV_GDELT_TIMESPAN=1month \
+python scripts/run_case.py ...
+```
+
 ## Deep Forensics / TruFor Setup
 
 `ForensicAnalyzer` supports two forensic engines, selected by `forensic_engine`
@@ -413,7 +499,7 @@ Convert a native case to canonical format:
 
 ```bash
 python scripts/convert_case.py \
-  --case-path data/raw/mv2026/training/ID333/ID333 \
+  --case-path data/raw/mv2026/training/ID333 \
   --adapter auto \
   --split training \
   --canonical-root data/canonical
@@ -454,28 +540,10 @@ Supported modes are:
 - `test`: test-safe execution with leakage guards.
 - `bootstrap_memory`: post-prediction memory bootstrapping from available gold.
 
-
-
-Run the ID333-style MV2026 case with local media adapters enabled:
+For an offline smoke run with heavy model adapters enabled:
 
 ```bash
-SEMV_ENABLE_OCR=true \
-SEMV_ENABLE_ASR=true \
-SEMV_ENABLE_VLM=true \
-SEMV_VLM_MODEL=Qwen/Qwen3.5-9B \
-SEMV_ENABLE_FORENSICS=true \
-SEMV_ENABLE_LOCAL_REVERSE=true \
-python scripts/run_case.py \
-  --case-path data/raw/mv2026/ID333 \
-  --adapter mv2026_folder \
-  --split validation \
-  --mode inference_only
-```
-
-For an offline smoke run with heavy model adapters disabled:
-
-```bash
-SEMV_ENABLE_FREE_WEB_SEARCH=true \
+SEMV_ENABLE_GDELT_SEARCH=true \
 SEMV_ENABLE_OCR=true \
 SEMV_ENABLE_ASR=true \
 SEMV_ENABLE_VLM=true \

@@ -22,6 +22,22 @@ _DEFAULT_TOOLS_CONFIG: dict[str, Any] = {
         "geocoding_enabled": False,
         "geocoding_provider": "nominatim",
         "geocoding_cache_path": "data/cache/geocoding_cache.json",
+        "gdelt_search_enabled": False,
+        "gdelt_base_url": "https://api.gdeltproject.org/api/v2/doc/doc",
+        "gdelt_max_records_per_claim": 8,
+        "gdelt_max_queries_per_claim": 4,
+        "gdelt_timespan": "3months",
+        "gdelt_timeout_sec": 15,
+        "gdelt_fetch_full_articles": True,
+        "gdelt_source_lang": "eng",
+        "gdelt_sort": "hybridrel",
+        "gdelt_min_relevance": 0.55,
+        "gdelt_cache_enabled": True,
+        "gdelt_cache_path": "data/cache/gdelt_search_cache.json",
+        "gdelt_min_interval_sec": 12,
+        "gdelt_max_retries": 3,
+        "gdelt_backoff_base_sec": 20,
+        "gdelt_circuit_breaker_cooldown_sec": 300,
     },
     "media": {
         "enable_ffmpeg_keyframes": True,
@@ -86,6 +102,15 @@ def load_tools_config() -> dict[str, Any]:
     _env_int(media, "forensic_trufor_timeout_sec", "SEMV_TRUFOR_TIMEOUT_SEC")
     _env_bool(media, "enable_local_reverse_search", "SEMV_ENABLE_LOCAL_REVERSE")
     _env_bool(retrieval, "free_web_search_enabled", "SEMV_ENABLE_FREE_WEB_SEARCH")
+    _env_bool(retrieval, "live_web_enabled", "SEMV_ENABLE_LIVE_WEB")
+    _env_bool(retrieval, "gdelt_search_enabled", "SEMV_ENABLE_GDELT_SEARCH")
+    _env_str(retrieval, "gdelt_timespan", "SEMV_GDELT_TIMESPAN")
+    _env_str(retrieval, "gdelt_source_lang", "SEMV_GDELT_SOURCE_LANG")
+    _env_int(retrieval, "gdelt_max_queries_per_claim", "SEMV_GDELT_MAX_QUERIES_PER_CLAIM")
+    _env_int(retrieval, "gdelt_max_records_per_claim", "SEMV_GDELT_MAX_RECORDS_PER_CLAIM")
+    _env_int(retrieval, "gdelt_min_interval_sec", "SEMV_GDELT_MIN_INTERVAL_SEC")
+    _env_int(retrieval, "gdelt_max_retries", "SEMV_GDELT_MAX_RETRIES")
+    _env_int(retrieval, "gdelt_backoff_base_sec", "SEMV_GDELT_BACKOFF_BASE_SEC")
     return config
 
 

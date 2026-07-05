@@ -12,6 +12,22 @@ retrieval:
   geocoding_enabled: false
   geocoding_provider: "nominatim"
   geocoding_cache_path: "data/cache/geocoding_cache.json"
+  gdelt_search_enabled: false
+  gdelt_base_url: "https://api.gdeltproject.org/api/v2/doc/doc"
+  gdelt_max_records_per_claim: 8
+  gdelt_max_queries_per_claim: 4
+  gdelt_timespan: "3months"
+  gdelt_timeout_sec: 15
+  gdelt_fetch_full_articles: true
+  gdelt_source_lang: "eng"
+  gdelt_sort: "hybridrel"
+  gdelt_min_relevance: 0.55
+  gdelt_cache_enabled: true
+  gdelt_cache_path: "data/cache/gdelt_search_cache.json"
+  gdelt_min_interval_sec: 12
+  gdelt_max_retries: 3
+  gdelt_backoff_base_sec: 20
+  gdelt_circuit_breaker_cooldown_sec: 300
 
 media:
   enable_ffmpeg_keyframes: true

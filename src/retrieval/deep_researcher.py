@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Iterable
 
 from src.retrieval.factcheck_search import FactCheckSearch
 from src.retrieval.free_web_search import FreeWebSearch
+from src.retrieval.gdelt_search import GDELTSearch
 from src.retrieval.geolocation_candidate_extractor import GeolocationCandidateExtractor
 from src.retrieval.geolocation_search import GeolocationSearch
 from src.retrieval.news_search import NewsSearch
@@ -15,6 +17,8 @@ from src.schemas.claim_schema import ResearchPlan, SubClaim
 from src.schemas.evidence_schema import EvidenceItem, Provenance
 from src.utils.hashing import stable_hash_text
 from src.utils.llm_client import LLMClient
+
+logger = logging.getLogger("run_case")
 
 
 MEDIA_QUERY_SOURCE_TYPES = {
@@ -37,6 +41,8 @@ class DeepResearcher:
         self.llm_client = llm_client
         cached = CachedEvidenceSearch()
         self.free_web_search = FreeWebSearch()
+        self.gdelt_search = GDELTSearch()
+        logger.info("GDELT search enabled=%s", self.gdelt_search.config.get("gdelt_search_enabled", False))
         self.adapters = [
             cached,
             ReverseSearch(cached),
@@ -65,6 +71,9 @@ class DeepResearcher:
         for adapter in self.adapters:
             for item in adapter.search(claim, enriched_plan):
                 found[item.evidence_id] = item
+
+        for item in self.gdelt_search.search(claim, enriched_plan, queries=derived_queries):
+            found[item.evidence_id] = item
 
         query_images = _query_image_paths(existing_evidence)
         for item in self.free_web_search.search(
@@ -140,7 +149,8 @@ def build_queries_from_evidence(
             queries.extend(_reverse_queries(claim.claim_type, item))
         elif item.source_type == "geolocation_candidate":
             name = item.raw_output.get("candidate_name") or item.metadata.get("candidate_name") or item.content
-            queries.append(f"{name} location")
+            if name and name.strip():
+                queries.append(f"{name.strip()} location")
     return _rank_and_dedupe_queries(claim.claim_type, queries, max_queries)
 
 
@@ -170,6 +180,8 @@ def _vlm_queries(claim_type: str, item: EvidenceItem) -> list[str]:
     for key in ("location_clues", "event_clues", "time_clues", "authenticity_clues"):
         values = raw.get(key) or []
         for value in values:
+            if not str(value).strip():
+                continue
             if claim_type == "where" and key == "location_clues":
                 queries.append(f"{value} location")
             elif claim_type == "when" and key == "time_clues":
