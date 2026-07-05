@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import base64
 import json
-import os
 from pathlib import Path
 from typing import Iterable
 
-import requests
-
 from src.schemas.evidence_schema import EvidenceItem, Provenance
 from src.utils.hashing import stable_hash_text
+from src.utils.llm_client import VLLMOpenAIClient
 from src.utils.tool_config import media_config
 
 
@@ -19,7 +16,7 @@ VLM_PROMPT = """Return strict JSON about this image/frame with keys: scene_summa
 class VLMVisualAnalyzer:
     def __init__(self, config: dict | None = None) -> None:
         self.config = media_config(config)
-        self.base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+        self.llm_client = VLLMOpenAIClient()
 
     def analyze(
         self,
@@ -34,10 +31,10 @@ class VLMVisualAnalyzer:
             return []
         if not self.config.get("enable_vlm_adapter", True):
             return [self._uncertainty_item(path, "vlm_adapter_disabled") for path in paths]
-        provider = self.config.get("vlm_provider", "ollama")
+        provider = self.config.get("vlm_provider", "vllm")
         if provider == "disabled":
             return [self._uncertainty_item(path, "vlm_adapter_disabled") for path in paths]
-        if provider != "ollama":
+        if provider != "vllm":
             return [self._uncertainty_item(path, f"vlm_provider_unavailable:{provider}") for path in paths]
 
         evidence: list[EvidenceItem] = []
@@ -46,35 +43,35 @@ class VLMVisualAnalyzer:
                 evidence.append(self._uncertainty_item(path, "vlm_media_missing"))
                 continue
             try:
-                data = self._ollama_generate(path, claim, context)
-            except Exception as exc:  # pragma: no cover - local Ollama availability varies
+                data = self._vllm_generate(path, claim, context)
+            except Exception as exc:  # pragma: no cover - local vLLM availability varies
                 evidence.append(self._uncertainty_item(path, f"vlm_adapter_failed:{exc.__class__.__name__}"))
                 continue
             evidence.extend(self._items_for_analysis(path, data))
         return evidence
 
-    def _ollama_generate(self, path: Path, claim: str, context: str | None) -> dict:
-        image_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+    def _vllm_generate(self, path: Path, claim: str, context: str | None) -> dict:
         prompt = VLM_PROMPT
         if claim:
             prompt += f"\nVerification claim: {claim}"
         if context:
             prompt += f"\nCase context: {context}"
-        payload = {
-            "model": self.config.get("vlm_model", "llava"),
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            "images": [image_b64],
-            "options": {"temperature": 0},
+
+        kwargs: dict[str, object] = {
+            "timeout": float(self.config.get("vlm_timeout_sec", 120)),
+            "format": {"type": "json_object"},
         }
-        response = requests.post(
-            f"{self.base_url}/api/generate",
-            json=payload,
-            timeout=float(self.config.get("vlm_timeout_sec", 120)),
+
+        vlm_model = self.config.get("vlm_model")
+        if vlm_model:
+            kwargs["model"] = str(vlm_model)
+
+        response_text = self.llm_client.generate_with_images(
+            prompt=prompt,
+            image_paths=[path],
+            system="Return strict JSON only. Do not include markdown.",
+            **kwargs,
         )
-        response.raise_for_status()
-        response_text = str(response.json().get("response", "")).strip()
         return _parse_json(response_text)
 
     def _items_for_analysis(self, path: Path, data: dict) -> list[EvidenceItem]:
@@ -185,7 +182,7 @@ class VLMVisualAnalyzer:
                 source_id=evidence_id,
                 source_type=source_type,  # type: ignore[arg-type]
                 source=str(path),
-                retrieval_method="ollama_multimodal",
+                retrieval_method="vllm_multimodal",
             ),
         )
 

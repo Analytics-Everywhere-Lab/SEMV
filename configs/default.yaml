@@ -1,5 +1,5 @@
 llm:
-  provider: ollama
+  provider: vllm
   use_env_model_name: true
 
 pipeline:

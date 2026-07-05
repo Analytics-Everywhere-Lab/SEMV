@@ -46,7 +46,7 @@ from src.schemas.qbaf_schema import QBAFGraph
 from src.schemas.report_schema import SubClaimReport, VerificationReport
 from src.utils.env_loader import get_bool_env, get_int_env
 from src.utils.io import project_root, read_json, write_json
-from src.utils.llm_client import LLMClient, OllamaLLMClient
+from src.utils.llm_client import LLMClient, build_llm_client
 
 
 logger = logging.getLogger("run_case")
@@ -72,7 +72,7 @@ def run_case_bundle(
         raise ValueError("mode must be inference_only, self_evolving, test, or bootstrap_memory")
 
     assert_no_gold_leakage(bundle, mode)
-    shared_llm_client = llm_client or OllamaLLMClient()
+    shared_llm_client = llm_client or build_llm_client()
     legacy_case = case_bundle_to_multimedia_case(bundle)
 
     logger.info("[1/8] Raw media processing")
@@ -378,7 +378,7 @@ def run_from_step(
         evidence=evidence,
         evidence_graph=evidence_graph,
         memory_used=memory_used,
-        llm_client=llm_client or OllamaLLMClient(),
+        llm_client=llm_client or build_llm_client(),
         exclude_rejected_arguments=exclude_rejected_arguments,
     )
     trace = _build_case_trace(

@@ -5,16 +5,14 @@ from pathlib import Path
 import pytest
 
 from src.utils.env_loader import get_bool_env, get_int_env
-from src.utils.llm_client import OllamaLLMClient
+from src.utils.llm_client import VLLMOpenAIClient
 
 
-def test_ollama_model_required_and_placeholder_rejected(tmp_path, monkeypatch):
-    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
-    env_path = tmp_path / ".env"
-    env_path.write_text("OLLAMA_MODEL=your_model_name_here\n", encoding="utf-8")
+def test_vllm_model_required_and_placeholder_rejected(monkeypatch):
+    monkeypatch.setenv("VLLM_MODEL", "your_model_name_here")
 
     with pytest.raises(ValueError):
-        OllamaLLMClient(env_path=str(env_path))
+        VLLMOpenAIClient()
 
 
 def test_source_does_not_hardcode_known_model_names():

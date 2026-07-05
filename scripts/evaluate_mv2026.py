@@ -10,7 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.evaluation.mv2026_evaluator import evaluate_mv2026
-from src.utils.llm_client import LoggingLLMClient, OllamaLLMClient
+from src.utils.llm_client import LoggingLLMClient, build_llm_client
 
 
 def main() -> None:
@@ -39,7 +39,7 @@ def main() -> None:
         args.case_id,
         args.limit,
     )
-    llm_client = LoggingLLMClient(OllamaLLMClient(), logger_name="llm.output")
+    llm_client = LoggingLLMClient(build_llm_client(), logger_name="llm.output")
 
     result = evaluate_mv2026(
         args.raw_root,

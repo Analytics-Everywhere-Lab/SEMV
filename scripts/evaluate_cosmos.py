@@ -10,7 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.evaluation.cosmos_evaluator import evaluate_cosmos
-from src.utils.llm_client import LoggingLLMClient, OllamaLLMClient
+from src.utils.llm_client import LoggingLLMClient, build_llm_client
 
 
 def main() -> None:
@@ -36,7 +36,7 @@ def main() -> None:
         args.mode,
         args.split,
     )
-    llm_client = LoggingLLMClient(OllamaLLMClient(), logger_name="llm.output")
+    llm_client = LoggingLLMClient(build_llm_client(), logger_name="llm.output")
 
     result = evaluate_cosmos(
         args.cosmos_metadata,

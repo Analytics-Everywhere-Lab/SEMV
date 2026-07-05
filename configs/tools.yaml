@@ -20,8 +20,8 @@ media:
   deduplicate_keyframes: true
 
   enable_vlm_adapter: true
-  vlm_provider: "ollama"
-  vlm_model: "llava"
+  vlm_provider: "vllm"
+  vlm_model: "Qwen/Qwen3.5-9B"
   vlm_timeout_sec: 120
 
   enable_ocr_adapter: true

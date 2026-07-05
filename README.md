@@ -172,19 +172,72 @@ adapters also require external local binaries or services, noted below.
 
 ## LLM Backend
 
-All agent-like components share `OllamaLLMClient`. Configure the local Ollama
-endpoint and model in `.env`:
+All agent-like components share `VLLMOpenAIClient`, built via `build_llm_client()`.
+SEMV talks to a local vLLM server through its OpenAI-compatible
+`/v1/chat/completions` endpoint. Configure it in `.env`:
 
 ```env
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=your_local_model_name
-OLLAMA_TEMPERATURE=0.0
-OLLAMA_NUM_CTX=8192
-OLLAMA_TIMEOUT=120
+SEMV_LLM_PROVIDER=vllm
+
+VLLM_BASE_URL=http://localhost:8000/v1
+VLLM_API_KEY=EMPTY
+VLLM_MODEL=Qwen/Qwen3.5-9B
+
+VLLM_TEMPERATURE=0.0
+VLLM_TOP_P=1.0
+VLLM_TOP_K=20
+VLLM_MAX_TOKENS=4096
+VLLM_TIMEOUT=120
+
+# For SEMV JSON-heavy pipeline, disable model thinking in requests.
+VLLM_ENABLE_THINKING=false
+
+# Use same model for visual analysis.
+SEMV_VLM_PROVIDER=vllm
+SEMV_VLM_MODEL=Qwen/Qwen3.5-9B
 ```
 
-`OLLAMA_MODEL` must name a model already available to the local Ollama server.
-Tests can inject fake LLM clients and do not require Ollama.
+`VLLM_MODEL` must name a model already served by the local vLLM server. Tests
+can inject fake LLM clients and do not require vLLM.
+
+Start the server before running the pipeline. It is recommended to keep vLLM
+in a separate environment from the rest of SEMV's dependencies, since vLLM
+pulls in heavy CUDA/Torch requirements:
+
+```bash
+uv pip install vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly
+```
+
+```bash
+VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 vllm serve Qwen/Qwen3.5-9B \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --tensor-parallel-size 1 \
+  --max-model-len 32768 \
+  --reasoning-parser qwen3 \
+  --gpu-memory-utilization 0.90
+```
+
+Context length (`--max-model-len`) is configured at server startup rather than
+per request. Start with `32768` to reduce OOM risk and increase to `65536` or
+higher only if the GPU has enough memory. Do not pass `--language-model-only`
+when `SEMV_ENABLE_VLM=true`, since SEMV needs image/frame analysis; use it
+only for text-only runs with `SEMV_ENABLE_VLM=false`.
+
+Quick server check:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3.5-9B",
+    "messages": [
+      {"role": "user", "content": "Return JSON only: {\"ok\": true}"}
+    ],
+    "temperature": 0,
+    "max_tokens": 64
+  }'
+```
 
 ## Media Processing and Tool Configuration
 
@@ -196,7 +249,7 @@ flow end-to-end for every case media asset:
 2. scene-aware video keyframe extraction with PySceneDetect and FFmpeg, falling
    back to uniform timestamps;
 3. OCR over original images and extracted keyframes;
-4. VLM analysis over original images and extracted keyframes through Ollama;
+4. VLM analysis over original images and extracted keyframes through vLLM;
 5. basic forensic analysis, including metadata flags and image-level checks;
 6. ASR for video audio through FFmpeg and faster-whisper;
 7. local reverse-image search over original images and keyframes, backed by
@@ -212,8 +265,8 @@ media:
   deduplicate_keyframes: true
 
   enable_vlm_adapter: true
-  vlm_provider: ollama
-  vlm_model: llava
+  vlm_provider: vllm
+  vlm_model: Qwen/Qwen3.5-9B
 
   enable_ocr_adapter: true
   enable_asr_adapter: true
@@ -226,8 +279,8 @@ Environment overrides are supported for the heavy adapters:
 
 ```env
 SEMV_ENABLE_VLM=true
-SEMV_VLM_PROVIDER=ollama
-SEMV_VLM_MODEL=llava
+SEMV_VLM_PROVIDER=vllm
+SEMV_VLM_MODEL=Qwen/Qwen3.5-9B
 SEMV_ENABLE_OCR=true
 SEMV_ENABLE_ASR=true
 SEMV_ENABLE_FORENSICS=true
@@ -334,7 +387,7 @@ Run the ID333-style MV2026 case with local media adapters enabled:
 SEMV_ENABLE_OCR=true \
 SEMV_ENABLE_ASR=true \
 SEMV_ENABLE_VLM=true \
-SEMV_VLM_MODEL=llava \
+SEMV_VLM_MODEL=Qwen/Qwen3.5-9B \
 SEMV_ENABLE_FORENSICS=true \
 SEMV_ENABLE_LOCAL_REVERSE=true \
 python scripts/run_case.py \
@@ -494,7 +547,7 @@ memory.
 
 ## Reproducibility Notes
 
-- Local LLM behavior depends on the configured Ollama model and decoding
+- Local LLM behavior depends on the configured vLLM model and decoding
   parameters.
 - Web and reverse-search behavior is controlled by each case `run_config` and
   tool configuration. `DeepResearcher` also reuses existing media evidence and
