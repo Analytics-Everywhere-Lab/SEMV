@@ -30,6 +30,8 @@ class ReflectionLog(BaseModel):
     human_feedback: dict[str, Any] = Field(default_factory=dict)
     failure_modes: list[str] = Field(default_factory=list)
     lessons: list[str] = Field(default_factory=list)
+    media_analysis: dict[str, list[Any]] = Field(default_factory=dict)
+    escalation: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -52,4 +54,6 @@ class VerificationReport(BaseModel):
     human_review_batch: HumanReviewBatch | None = None
     revision_plan: RevisionPlan | None = None
     contestation_summary: dict[str, Any] = Field(default_factory=dict)
+    media_analysis: dict[str, list[Any]] = Field(default_factory=dict)
+    escalation: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

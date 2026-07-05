@@ -62,7 +62,14 @@ class ArgumentScorer:
                 "relevance": claim_relevance,
                 "corroboration": cross_source_consistency,
                 "provenance_strength": groundedness,
+                "intrinsic_strength": intrinsic_score,
                 "intrinsic_score": intrinsic_score,
+                "strength_components": {
+                    "source_reliability": source_reliability,
+                    "cross_source_corroboration": cross_source_consistency,
+                    "cross_modal_consistency": cross_modal_consistency,
+                    "claim_relevance": claim_relevance,
+                },
                 "score": intrinsic_score,
             }
         )

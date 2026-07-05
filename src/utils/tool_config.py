@@ -15,6 +15,13 @@ _DEFAULT_TOOLS_CONFIG: dict[str, Any] = {
         "free_web_search_enabled": False,
         "max_web_results_per_claim": 5,
         "max_downloaded_candidate_images": 20,
+        "web_image_compare_enabled": True,
+        "web_image_min_width": 160,
+        "web_image_min_height": 120,
+        "geolocation_enabled": True,
+        "geocoding_enabled": False,
+        "geocoding_provider": "nominatim",
+        "geocoding_cache_path": "data/cache/geocoding_cache.json",
     },
     "media": {
         "enable_ffmpeg_keyframes": True,
@@ -35,9 +42,12 @@ _DEFAULT_TOOLS_CONFIG: dict[str, Any] = {
         "enable_forensic_adapter": True,
         "forensic_engine": "basic",
         "enable_local_reverse_search": True,
+        "local_reverse_methods": ["phash", "clip_faiss"],
         "visual_index_dir": "data/visual_index",
         "phash_threshold": 10,
         "clip_similarity_threshold": 0.84,
+        "clip_model_name": "ViT-B-32",
+        "clip_pretrained": "openai",
     },
 }
 

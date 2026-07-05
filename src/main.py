@@ -10,6 +10,7 @@ from src.aggregation.final_decision_aggregator import FinalDecisionAggregator
 from src.contestation.contestation_applier import apply_human_contestations, contestation_summary
 from src.contestation.revision_router import route_revision
 from src.argumentation.argument_generator import ArgumentGenerator
+from src.argumentation.uncertainty_escalator import UncertaintyEscalator
 from src.argumentation.argument_scorer import ArgumentScorer
 from src.argumentation.argument_verifier import ArgumentVerifier
 from src.argumentation.clash_resolver import ClashResolver
@@ -172,6 +173,7 @@ def run_case_bundle(
         evidence_graph=evidence_graph,
         memory_used=memory_used,
     )
+    report = _attach_escalation(report, subclaim_reports, all_arguments, normalized_evidence)
     report = report.model_copy(
         update={
             "metadata": {
@@ -503,7 +505,25 @@ def _rerun_qbaf_and_report(
         evidence_graph=evidence_graph,
         memory_used=memory_used,
     )
+    report = _attach_escalation(report, subclaim_reports, arguments, evidence)
     return report, qbaf_graphs, arguments
+
+
+def _attach_escalation(
+    report: VerificationReport,
+    subclaim_reports: list[SubClaimReport],
+    arguments: list[Argument],
+    evidence: list[EvidenceItem],
+) -> VerificationReport:
+    claim_scores = {subclaim.claim_id: subclaim.score for subclaim in subclaim_reports}
+    decisions = UncertaintyEscalator().evaluate(claim_scores, arguments, evidence)
+    escalation = [decision.model_dump(mode="json") for decision in decisions]
+    return report.model_copy(
+        update={
+            "escalation": escalation,
+            "metadata": {**report.metadata, "escalation": escalation},
+        }
+    )
 
 
 def _contestation_diff(

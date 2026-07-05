@@ -64,6 +64,8 @@ class MarkdownRenderer:
                 f"support={len(subclaim.top_support_arguments)}, attack={len(subclaim.top_attack_arguments)}"
             )
 
+        lines.extend(_render_escalation(report))
+
         lines.extend(["", "## Memory Used"])
         if report.memory_used:
             for item in report.memory_used:
@@ -98,38 +100,52 @@ class MarkdownRenderer:
         target.write_text(self.render(report), encoding="utf-8")
 
 
-_MEDIA_SOURCE_TYPES = {
-    "media_metadata": "Metadata",
-    "metadata_exiftool": "Metadata",
-    "metadata_ffprobe": "Metadata",
-    "scene_keyframe": "Keyframe",
-    "keyframe": "Keyframe",
-    "visual_caption": "VLM",
-    "visual_objects": "VLM",
-    "visual_vqa": "VLM",
-    "frame_analysis": "VLM",
-    "ocr": "OCR",
-    "asr": "ASR",
-    "forensic_analysis": "Forensics",
-    "reverse_image_local": "Local reverse search",
-    "reverse_image_web_candidate": "Web reverse search",
-    "visual_similarity": "Visual similarity",
-    "geolocation_candidate": "Geolocation clue",
+_MEDIA_SECTIONS = {
+    "Metadata": {"media_metadata", "metadata_exiftool", "metadata_ffprobe"},
+    "Keyframes": {"scene_keyframe", "keyframe"},
+    "OCR": {"ocr"},
+    "ASR": {"asr"},
+    "Visual Analysis": {"visual_caption", "visual_objects", "visual_vqa", "frame_analysis"},
+    "Forensic Analysis": {"forensic_analysis"},
+    "Reverse / Similarity Search": {"reverse_image_local", "visual_similarity"},
+    "Web Candidate Matches": {"reverse_image_web_candidate"},
+    "Geolocation Candidates": {"geolocation_candidate"},
+}
+
+
+_MEDIA_TOOL_FLAGS = {
+    "Metadata": {"metadata", "metadata_missing", "exiftool_missing", "ffprobe_missing"},
+    "Keyframes": {"scene_keyframe", "video_keyframes_unavailable"},
+    "OCR": {"ocr"},
+    "ASR": {"asr"},
+    "Visual Analysis": {"vlm"},
+    "Forensic Analysis": {"forensics", "forensic"},
+    "Reverse / Similarity Search": {"local_reverse_image_search", "local_reverse"},
 }
 
 
 def _render_media_analysis(report: VerificationReport) -> list[str]:
-    media_items = [item for item in report.evidence if _is_media_analysis_item(item)]
     lines = ["", "## Media Analysis"]
-    if not media_items:
-        lines.append("- No media-derived analysis evidence was generated.")
-        return lines
+    for heading, source_types in _MEDIA_SECTIONS.items():
+        lines.extend(["", f"### {heading}"])
+        items = [item for item in report.evidence if item.source_type in source_types]
+        if items:
+            lines.extend(_render_media_items(items))
+            continue
+        status = _tool_status_for_section(report, heading)
+        lines.append(f"- {status}")
+    lines.extend(["", "### Tool Availability and Uncertainty"])
+    uncertainty = [item for item in report.evidence if _is_media_uncertainty_item(item)]
+    if uncertainty:
+        lines.extend(_render_media_items(uncertainty))
+    else:
+        lines.append("- No media tool availability warnings recorded.")
+    return lines
 
-    lines.extend([
-        "| Type | Evidence | Source / frame | Reliability | Key finding |",
-        "| --- | --- | --- | ---: | --- |",
-    ])
-    for item in media_items:
+
+def _render_media_items(items: list[EvidenceItem]) -> list[str]:
+    lines = ["| Evidence | Source / frame | Reliability | Key finding |", "| --- | --- | ---: | --- |"]
+    for item in items:
         source = item.frame_path or item.media_path or item.source
         content = item.content
         if item.uncertainty_flags:
@@ -138,7 +154,6 @@ def _render_media_analysis(report: VerificationReport) -> list[str]:
             "| "
             + " | ".join(
                 [
-                    _clean_table_text(_MEDIA_SOURCE_TYPES.get(item.source_type, item.source_type)),
                     f"`{_clean_table_text(item.evidence_id)}`",
                     _clean_table_text(source, limit=80),
                     f"{item.reliability:.2f}",
@@ -150,9 +165,21 @@ def _render_media_analysis(report: VerificationReport) -> list[str]:
     return lines
 
 
-def _is_media_analysis_item(item: EvidenceItem) -> bool:
-    if item.source_type in _MEDIA_SOURCE_TYPES:
-        return True
+def _tool_status_for_section(report: VerificationReport, heading: str) -> str:
+    flags = _MEDIA_TOOL_FLAGS.get(heading, set())
+    for item in report.evidence:
+        text = " ".join(item.uncertainty_flags).lower()
+        adapter = ""
+        if item.provenance:
+            adapter = str(item.provenance.metadata.get("adapter", "")).lower()
+        if any(flag in text or flag in adapter for flag in flags):
+            if "disabled" in text:
+                return "not run (disabled)."
+            return "unavailable (dependency missing or adapter failed)."
+    return "no signal found."
+
+
+def _is_media_uncertainty_item(item: EvidenceItem) -> bool:
     if item.source_type != "synthetic_uncertainty":
         return False
     if item.media_path or item.frame_path:
@@ -161,6 +188,40 @@ def _is_media_analysis_item(item: EvidenceItem) -> bool:
     if item.provenance:
         adapter = str(item.provenance.metadata.get("adapter", ""))
     return adapter in {"metadata", "ocr", "asr", "vlm", "forensics", "scene_keyframe", "local_reverse_image_search"}
+
+
+def _render_escalation(report: VerificationReport) -> list[str]:
+    lines = ["", "## Escalation / Human Review"]
+    rows = report.escalation or report.metadata.get("escalation", [])
+    lines.extend(["| Claim | Escalate? | Reason | Affected stage | Suggested action |", "|---|---:|---|---|---|"])
+    if not rows:
+        lines.append("| all | no | none | none | none |")
+        return lines
+    for row in rows:
+        escalate = "yes" if row.get("should_escalate") else "no"
+        reasons = ", ".join(row.get("reason_codes", [])) or "none"
+        stages = ", ".join(row.get("affected_pipeline_stages", [])) or "none"
+        action = _suggest_escalation_action(row)
+        lines.append(
+            f"| {_clean_table_text(row.get('claim_id', 'unknown'))} | {escalate} | "
+            f"{_clean_table_text(reasons)} | {_clean_table_text(stages)} | {_clean_table_text(action)} |"
+        )
+    return lines
+
+
+def _suggest_escalation_action(row: dict) -> str:
+    stages = set(row.get("affected_pipeline_stages", []))
+    if "ocr" in stages:
+        return "rerun OCR or ask human to inspect visible text"
+    if "vlm_analysis" in stages:
+        return "rerun VLM or use stronger verifier"
+    if "reverse_search" in stages:
+        return "review reverse-search context"
+    if "human_contestation" in stages:
+        return "ask human to review argument"
+    if row.get("stronger_verifier_recommended"):
+        return "use stronger verifier"
+    return "no action required" if not row.get("should_escalate") else "human review recommended"
 
 
 def _clean_table_text(value: object, limit: int = 120) -> str:

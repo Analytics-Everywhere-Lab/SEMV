@@ -22,8 +22,19 @@ class Argument(BaseModel):
     title: str = "Argument"
     text: str
     evidence_ids: list[str] = Field(default_factory=list)
+    provenance_summary: str = ""
     rationale: str | None = None
+    intrinsic_strength: float = Field(default=0.5, ge=0.0, le=1.0)
     intrinsic_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    strength_components: dict[str, float] = Field(default_factory=dict)
+    contestability: dict[str, bool] = Field(
+        default_factory=lambda: {
+            "can_accept": True,
+            "can_reject": True,
+            "can_edit": True,
+            "can_add_counterargument": True,
+        }
+    )
     source_reliability: float = Field(default=0.5, ge=0.0, le=1.0)
     claim_relevance: float = Field(default=0.5, ge=0.0, le=1.0)
     cross_source_consistency: float = Field(default=0.5, ge=0.0, le=1.0)

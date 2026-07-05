@@ -34,40 +34,7 @@ class LocalReverseImageSearch:
                 evidence.append(self._uncertainty_item(path, f"local_reverse_search_failed:{exc.__class__.__name__}"))
                 continue
             for match in matches[:5]:
-                distance = match.get("phash_distance")
-                similarity = match.get("clip_similarity")
-                strong = distance is not None and distance <= max(4, int(self.config.get("phash_threshold", 10)) // 2)
-                evidence_id = f"reverse_local_{stable_hash_text(str(path) + str(match.get('asset_id')))}"
-                evidence.append(
-                    EvidenceItem(
-                        evidence_id=evidence_id,
-                        source_type="reverse_image_local",
-                        source=str(path),
-                        title="Local visual match found",
-                        content=(
-                            f"Query image/keyframe visually matches previous asset {match.get('path')} "
-                            f"with pHash distance {distance} and CLIP similarity {similarity}."
-                        ),
-                        reliability=0.75 if strong else 0.55,
-                        relevance=0.85,
-                        media_path=str(path),
-                        metadata={
-                            "matched_path": match.get("path"),
-                            "phash_distance": distance,
-                            "clip_similarity": similarity,
-                            "matched_case_id": match.get("case_id"),
-                            "asset_id": match.get("asset_id"),
-                        },
-                        supports_claim_types=["what", "where", "when", "authenticity"],
-                        provenance=Provenance(
-                            source_id=evidence_id,
-                            source_type="reverse_image_local",
-                            source=str(path),
-                            retrieval_method="imagehash_phash_local_index",
-                            metadata={"matched_asset_id": match.get("asset_id")},
-                        ),
-                    )
-                )
+                evidence.append(self._match_item(path, match))
         return evidence
 
     def add_assets(
@@ -80,6 +47,66 @@ class LocalReverseImageSearch:
             assets = list(image_paths if image_paths is not None else paths or [])
             if assets:
                 self.index.add_assets(assets, case_id=case_id)
+
+    @staticmethod
+    def reliability_for_match(phash_distance: int | None, clip_similarity: float | None, methods: list[str]) -> float:
+        phash_strong = phash_distance is not None and phash_distance <= 4
+        clip_strong = clip_similarity is not None and clip_similarity >= 0.90
+        clip_weak = clip_similarity is not None and clip_similarity >= 0.0
+        if "phash" in methods and "clip_faiss" in methods:
+            return 0.90
+        if phash_strong:
+            return 0.80
+        if clip_strong:
+            return 0.80
+        if clip_weak:
+            return 0.65
+        return 0.55
+
+    def _match_item(self, query_path: Path, match: dict) -> EvidenceItem:
+        methods = sorted(set(match.get("methods") or []))
+        distance = match.get("phash_distance")
+        similarity = match.get("clip_similarity")
+        reliability = self.reliability_for_match(distance, similarity, methods)
+        evidence_id = f"reverse_local_{stable_hash_text(str(query_path) + str(match.get('asset_id')))}"
+        raw_output = {
+            "query_path": str(query_path),
+            "matched_path": match.get("path"),
+            "matched_case_id": match.get("case_id"),
+            "phash_distance": distance,
+            "clip_similarity": similarity,
+            "methods": methods,
+        }
+        return EvidenceItem(
+            evidence_id=evidence_id,
+            source_type="reverse_image_local",
+            source=str(query_path),
+            title="Local visual match found",
+            content=(
+                f"Query image/keyframe visually matches previous asset {match.get('path')} "
+                f"from case {match.get('case_id')} using {', '.join(methods) or 'visual similarity'}."
+            ),
+            reliability=reliability,
+            relevance=0.85,
+            media_path=str(query_path),
+            raw_output=raw_output,
+            metadata={
+                "matched_path": match.get("path"),
+                "phash_distance": distance,
+                "clip_similarity": similarity,
+                "matched_case_id": match.get("case_id"),
+                "asset_id": match.get("asset_id"),
+                "methods": methods,
+            },
+            supports_claim_types=["what", "where", "when", "authenticity"],
+            provenance=Provenance(
+                source_id=evidence_id,
+                source_type="reverse_image_local",
+                source=str(query_path),
+                retrieval_method="local_visual_index",
+                metadata={"matched_asset_id": match.get("asset_id"), "methods": methods},
+            ),
+        )
 
     @staticmethod
     def _uncertainty_item(path: Path, flag: str) -> EvidenceItem:

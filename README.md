@@ -203,8 +203,8 @@ flow end-to-end for every case media asset:
 4. VLM analysis over original images and extracted keyframes through Ollama;
 5. basic forensic analysis, including metadata flags and image-level checks;
 6. ASR for video audio through FFmpeg and faster-whisper;
-7. local reverse-image search over original images and keyframes, backed by the
-   local visual index.
+7. local reverse-image search over original images and keyframes, backed by
+   pHash plus optional OpenCLIP/FAISS visual similarity in the local index.
 
 Relevant media flags in `configs/tools.yaml` include:
 
@@ -223,6 +223,7 @@ media:
   enable_asr_adapter: true
   enable_forensic_adapter: true
   enable_local_reverse_search: true
+  local_reverse_methods: ["phash", "clip_faiss"]
 ```
 
 Environment overrides are supported for the heavy adapters:
@@ -242,7 +243,24 @@ If optional binaries, models, or local services are missing, adapters should emi
 synthetic uncertainty evidence instead of crashing. For full local capability,
 install FFmpeg/FFprobe for video and audio processing, ExifTool for richer
 metadata extraction, EasyOCR model dependencies for OCR, faster-whisper models
-for ASR, and an Ollama multimodal model such as `llava` for VLM analysis.
+for ASR, and an Ollama multimodal model such as `llava` for VLM-based visual
+observation. The project implements local pHash plus optional CLIP/FAISS visual
+similarity; it does not claim official Google Lens, Yandex, or TinEye reverse
+image search integration. Forensics are basic heuristics unless a learned model
+is explicitly configured.
+
+| Component | Implemented | Default | Dependency | Notes |
+|---|---:|---:|---|---|
+| Metadata | yes | on | Pillow, ffprobe, exiftool optional | graceful fallback |
+| Keyframes | yes | on | ffmpeg, PySceneDetect optional | scene detection with uniform fallback |
+| OCR | yes | configurable | EasyOCR | optional, emits uncertainty if unavailable |
+| ASR | yes | configurable | faster-whisper, ffmpeg | optional, video only |
+| VLM | yes | configurable | Ollama LLaVA or equivalent | VLM-based visual observation, not ground truth |
+| Forensics | basic | on | Pillow/OpenCV | heuristic only |
+| Local reverse | yes | on | pHash, optional OpenCLIP/FAISS | local/cached only |
+| Web reverse candidate | yes | off unless free web enabled | web search + image compare | not Google Lens |
+| Geolocation | partial | configurable | optional cached Nominatim | GPS/clue extraction offline first |
+| Escalation | yes | on | none | score/conflict based |
 
 ## Parallel Execution
 
@@ -335,6 +353,39 @@ Supported modes are:
 - `test`: test-safe execution with leakage guards.
 - `bootstrap_memory`: post-prediction memory bootstrapping from available gold.
 
+
+
+Run the ID333-style MV2026 case with local media adapters enabled:
+
+```bash
+SEMV_ENABLE_OCR=true \
+SEMV_ENABLE_ASR=true \
+SEMV_ENABLE_VLM=true \
+SEMV_VLM_MODEL=llava \
+SEMV_ENABLE_FORENSICS=true \
+SEMV_ENABLE_LOCAL_REVERSE=true \
+python scripts/run_case.py \
+  --case-path data/raw/mv2026/ID333 \
+  --adapter mv2026_folder \
+  --split validation \
+  --mode inference_only
+```
+
+For an offline smoke run with heavy model adapters disabled:
+
+```bash
+SEMV_ENABLE_OCR=false \
+SEMV_ENABLE_ASR=false \
+SEMV_ENABLE_VLM=false \
+SEMV_ENABLE_FORENSICS=true \
+SEMV_ENABLE_LOCAL_REVERSE=true \
+python scripts/run_case.py \
+  --case-path data/raw/mv2026/ID333 \
+  --adapter mv2026_folder \
+  --split validation \
+  --mode inference_only
+```
+
 A feedback file can be supplied with the current CLI shape:
 
 ```bash
@@ -388,7 +439,11 @@ data/outputs/_media/<case_id>/media_<index>/
 ```
 
 These folders can contain extracted keyframes, ASR audio intermediates, and
-forensic outputs such as ELA images.
+forensic outputs such as ELA images. Verify a completed case directory with:
+
+```bash
+python scripts/check_case_outputs.py data/outputs/cases/ID333
+```
 
 For a full contestation implementation, the recommended additional artifacts are:
 

@@ -13,12 +13,15 @@ class WebArticle:
     source_name: str | None = None
     canonical_url: str | None = None
     image_urls: list[str] | None = None
+    html: str = ""
 
 
 class WebArticleExtractor:
     def extract(self, url: str, timeout: float = 10.0) -> WebArticle:
         import requests
         from bs4 import BeautifulSoup
+
+        from src.retrieval.web_image_candidate_extractor import WebImageCandidateExtractor
 
         response = requests.get(url, timeout=timeout, headers={"User-Agent": "SEMV research bot"})
         response.raise_for_status()
@@ -33,14 +36,12 @@ class WebArticleExtractor:
         soup = BeautifulSoup(html, "html.parser")
         title = (soup.title.string.strip() if soup.title and soup.title.string else "")
         canonical = soup.find("link", rel="canonical")
-        og_image = soup.find("meta", property="og:image")
-        images = []
-        if og_image and og_image.get("content"):
-            images.append(og_image["content"])
+        image_urls = WebImageCandidateExtractor().extract_image_urls(html, url)
         return WebArticle(
             url=url,
             title=title,
             text=text,
             canonical_url=canonical.get("href") if canonical else url,
-            image_urls=images,
+            image_urls=image_urls,
+            html=html,
         )
