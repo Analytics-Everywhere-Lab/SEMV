@@ -26,3 +26,21 @@ def test_mock_geocoder_returns_lat_lon(monkeypatch, tmp_path):
     item = EvidenceItem(evidence_id="o", source_type="ocr", source="img", content="Visible text: Halifax")
     candidates = extractor.extract([item])
     assert any(c.raw_output["lat"] == 1.0 for c in candidates)
+
+
+def test_geolocation_does_not_extract_chroma_location_center():
+    item = EvidenceItem(
+        evidence_id="ffprobe1",
+        source_type="metadata_ffprobe",
+        source="video.mp4",
+        title="FFprobe metadata",
+        content="Video metadata",
+        reliability=0.8,
+        relevance=0.6,
+        raw_output={"streams": [{"chroma_location": "center"}]},
+        metadata={"ffprobe": {"streams": [{"chroma_location": "center"}]}},
+    )
+
+    candidates = GeolocationCandidateExtractor({"retrieval": {"geocoding_enabled": False}}).extract([item])
+
+    assert candidates == []

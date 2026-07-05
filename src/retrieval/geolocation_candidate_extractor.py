@@ -14,6 +14,37 @@ from src.utils.io import project_root
 from src.utils.tool_config import retrieval_config
 
 
+LOCATION_KEYS = {
+    "city",
+    "country",
+    "place",
+    "location",
+    "candidate_name",
+    "address",
+    "region",
+    "province",
+    "state",
+}
+BLOCKED_KEYS = {
+    "chroma_location",
+    "sample_aspect_ratio",
+    "display_aspect_ratio",
+    "color_space",
+    "color_transfer",
+    "color_primaries",
+}
+GENERIC_LOCATION_VALUES = {
+    "center",
+    "left",
+    "right",
+    "top",
+    "bottom",
+    "unknown",
+    "none",
+    "n/a",
+}
+
+
 class GeolocationCandidateExtractor:
     def __init__(self, config: dict | None = None) -> None:
         self.config = retrieval_config(config)
@@ -206,10 +237,8 @@ def _extract_location_names(item: EvidenceItem) -> list[str]:
         name = raw.get("candidate_name") or metadata.get("candidate_name")
         if name:
             values.append(str(name))
-    text = json.dumps({"metadata": metadata, "raw": raw}, default=str)
-    for key in ("city", "location", "place", "candidate_name"):
-        matches = re.findall(rf"['\"]?{key}['\"]?\s*[:=]\s*['\"]([^'\"]{{3,80}})['\"]", text, flags=re.IGNORECASE)
-        values.extend(matches)
+    values.extend(_collect_location_values(metadata))
+    values.extend(_collect_location_values(raw))
     cleaned = []
     seen = set()
     for value in values:
@@ -221,6 +250,24 @@ def _extract_location_names(item: EvidenceItem) -> list[str]:
     return cleaned
 
 
+def _collect_location_values(obj: Any) -> list[str]:
+    values: list[str] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            key_lower = str(key).lower()
+            if key_lower in BLOCKED_KEYS:
+                continue
+            if key_lower in LOCATION_KEYS and isinstance(value, str):
+                values.append(value)
+                continue
+            if isinstance(value, (dict, list)):
+                values.extend(_collect_location_values(value))
+    elif isinstance(obj, list):
+        for item in obj:
+            values.extend(_collect_location_values(item))
+    return values
+
+
 def _named_location_phrases(text: str) -> list[str]:
     tokens = re.findall(r"\b(?:[A-Z][a-zA-Z'’-]+(?:\s+[A-Z][a-zA-Z'’-]+){0,3})\b", text)
     stop = {"Visible Text", "Candidate Location", "Web Article", "Local Visual", "GPS"}
@@ -230,6 +277,9 @@ def _named_location_phrases(text: str) -> list[str]:
 def _title_location(value: str) -> str:
     cleaned = " ".join(str(value).replace("Candidate location:", "").split())
     cleaned = cleaned.strip(" .,:;|-_")
+    normalized = cleaned.casefold()
     if not cleaned or len(cleaned) < 3 or len(cleaned) > 100:
+        return ""
+    if normalized in GENERIC_LOCATION_VALUES:
         return ""
     return cleaned.title() if cleaned.islower() else cleaned

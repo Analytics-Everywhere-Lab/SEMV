@@ -43,17 +43,23 @@ def main() -> int:
         return _finish(errors)
 
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    normalized_path = case_dir / "normalized_evidence.json"
+    normalized = json.loads(normalized_path.read_text(encoding="utf-8")) if normalized_path.exists() else []
+    evidence_pool = [item for item in [*raw, *normalized] if isinstance(item, dict)]
     arguments = json.loads(args_path.read_text(encoding="utf-8"))
     markdown = report_path.read_text(encoding="utf-8")
     if "## Media Analysis" not in markdown:
         errors.append("report.md missing ## Media Analysis")
     if "## Escalation / Human Review" not in markdown:
         errors.append("report.md missing escalation section")
-    if not any(item.get("source_type") in MEDIA_TYPES for item in raw):
-        errors.append("raw_evidence.json has no media-derived evidence type")
+    if not any(item.get("source_type") in MEDIA_TYPES for item in evidence_pool):
+        errors.append("evidence outputs have no media-derived evidence type")
 
-    evidence_ids = {item.get("evidence_id") for item in raw}
-    for argument in arguments:
+    evidence_ids = {item.get("evidence_id") for item in evidence_pool}
+    for index, argument in enumerate(arguments):
+        if not isinstance(argument, dict):
+            errors.append(f"arguments.json item {index} is not an object")
+            continue
         for evidence_id in argument.get("evidence_ids", []):
             if evidence_id not in evidence_ids:
                 errors.append(f"argument {argument.get('argument_id')} references missing evidence {evidence_id}")

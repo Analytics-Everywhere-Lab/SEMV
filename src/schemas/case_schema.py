@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.schemas.evidence_schema import EvidenceItem
+from src.utils.io import project_root
 
 
 MediaType = Literal["image", "video", "unknown"]
@@ -21,9 +22,19 @@ class MediaItem(BaseModel):
 
     def resolved_path(self, base_dir: Path | None = None) -> Path:
         candidate = Path(self.path)
-        if candidate.is_absolute() or base_dir is None:
+        if candidate.is_absolute():
             return candidate
-        return (base_dir / candidate).resolve()
+
+        if base_dir is not None:
+            by_base = (base_dir / candidate).resolve()
+            if by_base.exists():
+                return by_base
+
+        by_project = (project_root() / candidate).resolve()
+        if by_project.exists():
+            return by_project
+
+        return (base_dir / candidate).resolve() if base_dir is not None else by_project
 
 
 class MultimediaCase(BaseModel):
