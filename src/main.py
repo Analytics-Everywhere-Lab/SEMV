@@ -334,6 +334,9 @@ def run_case(
     human_feedback: dict | None = None,
     llm_client: LLMClient | None = None,
     case_path: Path | None = None,
+    human_review_path: str | Path | None = None,
+    enable_adaptive_revision: bool | None = None,
+    exclude_rejected_arguments: bool = True,
 ) -> VerificationReport:
     bundle = multimedia_case_to_case_bundle(case)
     if ground_truth_label or subclaim_labels:
@@ -353,6 +356,9 @@ def run_case(
         mode=mode,
         llm_client=llm_client,
         case_path=case_path,
+        human_review_path=human_review_path,
+        enable_adaptive_revision=enable_adaptive_revision,
+        exclude_rejected_arguments=exclude_rejected_arguments,
     )
 
 

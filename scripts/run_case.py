@@ -39,7 +39,7 @@ def main() -> None:
     parser.add_argument("--ground-truth-label", default=None)
     parser.add_argument("--human-feedback-json", default=None)
     parser.add_argument("--human_review_path", default=None)
-    parser.add_argument("--enable_adaptive_revision", default="false")
+    parser.add_argument("--enable_adaptive_revision", default=None)
     parser.add_argument("--save_case_trace", default="true")
     parser.add_argument("--exclude_rejected_arguments", default="true")
     args = parser.parse_args()
@@ -53,7 +53,7 @@ def main() -> None:
         bundle = load_case_bundle(path)
         logger.info("Loaded case_id=%s with %d media item(s)", bundle.case_id, len(bundle.media))
         logger.info("Starting pipeline...")
-        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=path, human_review_path=human_review_path, enable_adaptive_revision=_parse_bool(args.enable_adaptive_revision), save_case_trace=_parse_bool(args.save_case_trace), exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments))
+        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=path, human_review_path=human_review_path, enable_adaptive_revision=_parse_optional_bool(args.enable_adaptive_revision), save_case_trace=_parse_bool(args.save_case_trace), exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments))
         logger.info("Pipeline finished")
     elif args.case_path:
         native = _resolve(args.case_path)
@@ -62,7 +62,7 @@ def main() -> None:
         logger.info("Loaded case_id=%s with %d media asset(s)", bundle.case_id, len(bundle.media_assets))
         write_canonical_bundle(bundle, args.canonical_root)
         logger.info("Starting pipeline...")
-        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=native, human_review_path=human_review_path, enable_adaptive_revision=_parse_bool(args.enable_adaptive_revision), save_case_trace=_parse_bool(args.save_case_trace), exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments))
+        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=native, human_review_path=human_review_path, enable_adaptive_revision=_parse_optional_bool(args.enable_adaptive_revision), save_case_trace=_parse_bool(args.save_case_trace), exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments))
         logger.info("Pipeline finished")
     elif args.case:
         path = _resolve(args.case)
@@ -74,6 +74,9 @@ def main() -> None:
             mode="self_evolving" if args.mode == "self_evolving" else "inference_only",
             ground_truth_label=args.ground_truth_label,
             case_path=path,
+            human_review_path=human_review_path,
+            enable_adaptive_revision=_parse_optional_bool(args.enable_adaptive_revision),
+            exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments),
         )
         logger.info("Pipeline finished")
     else:
@@ -90,6 +93,12 @@ def _parse_bool(value: str | bool) -> bool:
     if isinstance(value, bool):
         return value
     return value.lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _parse_optional_bool(value: str | bool | None) -> bool | None:
+    if value is None:
+        return None
+    return _parse_bool(value)
 
 
 def _resolve(path: str) -> Path:

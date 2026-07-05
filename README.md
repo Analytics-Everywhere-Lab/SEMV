@@ -78,16 +78,32 @@ final_aggregation
 report_generation
 ```
 
-This makes the contestation mechanism adaptive. For example, rejecting an
-argument because the retrieved source does not actually support the claim
-sends the pipeline back to `evidence_retrieval`, not merely rescore the
-argument. Rejecting an argument because the evidence itself does not support
-the claim (wrong date, wrong location, wrong entity, irrelevant source)
-restarts from `evidence_validation`. Editing an argument's wording or adding a
-new argument backed by existing evidence restarts from
-`argument_construction`. Accepting an argument, or rejecting/editing it for
-reasons unrelated to evidence, only reruns `qbaf_reasoning` and the final
-report. See `src/contestation/revision_router.py` and
+This makes the contestation mechanism adaptive. Routing is driven by the
+action type and keyword matching on the free-text `reason`
+(`src/contestation/revision_router.py`):
+
+- `accept` reruns QBAF/reporting only (`qbaf_reasoning`).
+- `edit` (wording/stance/confidence only, no unknown evidence referenced),
+  `add` (backed by evidence already known to the system), and `reject` for a
+  reason that does not name an evidence problem rerun from
+  `argument_construction`.
+- `reject` for a reason describing an evidence-content problem — e.g. "does
+  not support", "wrong date", "wrong location", "wrong entity", "irrelevant
+  source" — reruns from `evidence_validation`, which re-normalizes evidence
+  and rebuilds arguments for the affected subclaims.
+- `reject` for a reason describing a sourcing/retrieval problem — e.g. "wrong
+  source", "missing source", "source mismatch", "retrieval error", "new
+  source" — or an `edit`/`add` that references evidence IDs unknown to the
+  system, reruns from `evidence_retrieval`: deep research runs again for the
+  affected subclaims only, then evidence and arguments are rebuilt before
+  QBAF/reporting.
+
+A contestation can also force one of these targets directly via
+`metadata.revision_target`, bypassing keyword inference. In every case the
+selected stage and everything downstream of it (arguments, QBAF, final
+aggregation, report) is recomputed only for the affected subclaims;
+unaffected subclaims keep their existing arguments. See
+`src/contestation/revision_router.py` and
 `src/contestation/adaptive_revision_executor.py` for the full routing and
 rerun implementation.
 
