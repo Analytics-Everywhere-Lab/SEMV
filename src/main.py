@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from src.aggregation.final_decision_aggregator import FinalDecisionAggregator
+from src.contestation.adaptive_revision_executor import execute_adaptive_revision
 from src.contestation.contestation_applier import apply_human_contestations, contestation_summary
 from src.contestation.revision_router import route_revision
 from src.argumentation.argument_generator import ArgumentGenerator
@@ -63,7 +64,7 @@ def run_case_bundle(
     case_path: Path | None = None,
     human_review_path: str | Path | None = None,
     human_review_batch: HumanReviewBatch | None = None,
-    enable_adaptive_revision: bool = False,
+    enable_adaptive_revision: bool | None = None,
     save_case_trace: bool = True,
     exclude_rejected_arguments: bool = True,
 ) -> VerificationReport:
@@ -219,18 +220,37 @@ def run_case_bundle(
             current_arguments=all_arguments,
             case_trace=pre_trace,
         )
-        reviewed_arguments = apply_human_contestations(all_arguments, review_batch)
-        report, qbaf_graphs, all_arguments = _rerun_qbaf_and_report(
-            legacy_case=legacy_case,
-            bundle=bundle,
-            claims=claims,
-            arguments=reviewed_arguments,
-            evidence=normalized_evidence,
-            evidence_graph=evidence_graph,
-            memory_used=memory_used,
-            llm_client=shared_llm_client,
-            exclude_rejected_arguments=exclude_rejected_arguments,
-        )
+        use_adaptive_revision = True if enable_adaptive_revision is None else enable_adaptive_revision
+        if not use_adaptive_revision:
+            reviewed_arguments = apply_human_contestations(all_arguments, review_batch)
+            report, qbaf_graphs, all_arguments = _rerun_qbaf_and_report(
+                legacy_case=legacy_case,
+                bundle=bundle,
+                claims=claims,
+                arguments=reviewed_arguments,
+                evidence=normalized_evidence,
+                evidence_graph=evidence_graph,
+                memory_used=memory_used,
+                llm_client=shared_llm_client,
+                exclude_rejected_arguments=exclude_rejected_arguments,
+            )
+        else:
+            report, qbaf_graphs, all_arguments, normalized_evidence, evidence_graph = execute_adaptive_revision(
+                bundle=bundle,
+                legacy_case=legacy_case,
+                claims=claims,
+                raw_evidence=raw_evidence,
+                all_evidence=all_evidence,
+                normalized_evidence=normalized_evidence,
+                evidence_graph=evidence_graph,
+                memory_by_claim=memory_by_claim,
+                original_arguments=all_arguments,
+                review_batch=review_batch,
+                revision_plan=revision_plan,
+                research_plans=research_plans,
+                llm_client=shared_llm_client,
+                exclude_rejected_arguments=exclude_rejected_arguments,
+            )
         contestation_diff = _contestation_diff(
             original_report=report_before_contestation,
             revised_report=report,
@@ -252,7 +272,12 @@ def run_case_bundle(
                     "task": bundle.task.model_dump(mode="json"),
                     "input": bundle.input.model_dump(mode="json"),
                     "gold_visibility": bundle.gold.gold_visibility,
-                    "enable_adaptive_revision": enable_adaptive_revision,
+                    "enable_adaptive_revision": use_adaptive_revision,
+                    "adaptive_revision_executed": use_adaptive_revision,
+                    "rerun_from_step": revision_plan.rerun_from_step,
+                    "affected_subclaim_ids": revision_plan.affected_subclaim_ids,
+                    "affected_evidence_ids": revision_plan.affected_evidence_ids,
+                    "affected_argument_ids": revision_plan.affected_argument_ids,
                     "human_contestation_changed_final_decision": contestation_diff[
                         "human_contestation_changed_final_decision"
                     ],
@@ -356,40 +381,62 @@ def run_from_step(
     evidence = _coerce_evidence(
         previous_state.validated_evidence_items or previous_state.evidence_items
     )
+    raw_evidence = _coerce_evidence(previous_state.metadata.get("raw_evidence", []) or evidence)
     original_arguments = _coerce_arguments(previous_state.arguments)
     revision_plan = None
     arguments = original_arguments
+    evidence_graph = EvidenceGraphBuilder().build(evidence, claims)
+    legacy_case = case_bundle_to_multimedia_case(bundle)
+    active_llm_client = llm_client or build_llm_client()
+    memory_used: list[MemoryRecord] = []
+    normalized_evidence = evidence
+
     if human_review_batch is not None:
         revision_plan = route_revision(
             review_batch=human_review_batch,
             current_arguments=original_arguments,
             case_trace=previous_state,
         )
-        arguments = apply_human_contestations(original_arguments, human_review_batch)
+        memory_by_claim = _memory_by_claim_from_trace(previous_state, claims)
+        research_plans = _research_plans_from_trace(previous_state)
+        report, _, reviewed_arguments, normalized_evidence, evidence_graph = execute_adaptive_revision(
+            bundle=bundle,
+            legacy_case=legacy_case,
+            claims=claims,
+            raw_evidence=raw_evidence,
+            all_evidence=evidence,
+            normalized_evidence=evidence,
+            evidence_graph=evidence_graph,
+            memory_by_claim=memory_by_claim,
+            original_arguments=original_arguments,
+            review_batch=human_review_batch,
+            revision_plan=revision_plan,
+            research_plans=research_plans,
+            llm_client=active_llm_client,
+            exclude_rejected_arguments=exclude_rejected_arguments,
+        )
+    else:
+        report, _, reviewed_arguments = _rerun_qbaf_and_report(
+            legacy_case=legacy_case,
+            bundle=bundle,
+            claims=claims,
+            arguments=arguments,
+            evidence=evidence,
+            evidence_graph=evidence_graph,
+            memory_used=memory_used,
+            llm_client=active_llm_client,
+            exclude_rejected_arguments=exclude_rejected_arguments,
+        )
 
-    evidence_graph = EvidenceGraphBuilder().build(evidence, claims)
-    legacy_case = case_bundle_to_multimedia_case(bundle)
-    memory_used: list[MemoryRecord] = []
-    report, _, reviewed_arguments = _rerun_qbaf_and_report(
-        legacy_case=legacy_case,
-        bundle=bundle,
-        claims=claims,
-        arguments=arguments,
-        evidence=evidence,
-        evidence_graph=evidence_graph,
-        memory_used=memory_used,
-        llm_client=llm_client or build_llm_client(),
-        exclude_rejected_arguments=exclude_rejected_arguments,
-    )
     trace = _build_case_trace(
         bundle=bundle,
         claims=claims,
-        evidence_items=evidence,
-        validated_evidence_items=evidence,
+        evidence_items=normalized_evidence,
+        validated_evidence_items=normalized_evidence,
         arguments=reviewed_arguments,
         qbaf_graphs=[],
         report=report,
-        raw_evidence=[],
+        raw_evidence=raw_evidence,
     )
     trace.metadata["rerun_from_step"] = step_name
     report.metadata["case_trace"] = trace.model_dump(mode="json")
@@ -413,10 +460,44 @@ def run_from_step(
                 "human_review_batch": human_review_batch,
                 "revision_plan": revision_plan,
                 "contestation_summary": summary,
-                "metadata": {**report.metadata, "case_trace": trace.model_dump(mode="json")},
+                "metadata": {
+                    **report.metadata,
+                    "case_trace": trace.model_dump(mode="json"),
+                    "adaptive_revision_executed": True,
+                    "rerun_from_step": revision_plan.rerun_from_step,
+                    "affected_subclaim_ids": revision_plan.affected_subclaim_ids,
+                    "affected_evidence_ids": revision_plan.affected_evidence_ids,
+                    "affected_argument_ids": revision_plan.affected_argument_ids,
+                },
             }
         )
     return report
+
+
+def _memory_by_claim_from_trace(
+    previous_state: CaseTrace,
+    claims: list[SubClaim],
+) -> dict[str, list[MemoryRecord]]:
+    stored = previous_state.metadata.get("memory_by_claim")
+    if stored:
+        return {
+            claim_id: [
+                item if isinstance(item, MemoryRecord) else MemoryRecord.model_validate(item)
+                for item in items
+            ]
+            for claim_id, items in stored.items()
+        }
+    return {claim.claim_id: [] for claim in claims}
+
+
+def _research_plans_from_trace(previous_state: CaseTrace) -> dict[str, ResearchPlan]:
+    stored = previous_state.metadata.get("research_plans")
+    if not stored:
+        return {}
+    return {
+        claim_id: item if isinstance(item, ResearchPlan) else ResearchPlan.model_validate(item)
+        for claim_id, item in stored.items()
+    }
 
 
 def _load_human_review_batch(
@@ -924,7 +1005,7 @@ def main() -> None:
     parser.add_argument("--mode", choices=["inference_only", "self_evolving", "test", "bootstrap_memory"], default="inference_only")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--human_review_path", default=None)
-    parser.add_argument("--enable_adaptive_revision", default="false")
+    parser.add_argument("--enable_adaptive_revision", default=None)
     parser.add_argument("--save_case_trace", default="true")
     parser.add_argument("--exclude_rejected_arguments", default="true")
     args = parser.parse_args()
@@ -939,7 +1020,9 @@ def main() -> None:
         config_path=args.config,
         case_path=case_path,
         human_review_path=args.human_review_path,
-        enable_adaptive_revision=_parse_bool(args.enable_adaptive_revision),
+        enable_adaptive_revision=(
+            None if args.enable_adaptive_revision is None else _parse_bool(args.enable_adaptive_revision)
+        ),
         save_case_trace=_parse_bool(args.save_case_trace),
         exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments),
     )
