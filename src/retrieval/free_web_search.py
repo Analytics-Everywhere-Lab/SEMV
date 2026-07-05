@@ -115,8 +115,9 @@ class FreeWebSearch:
         if self.config.get("web_image_compare_enabled", True) and query_image_paths and article:
             max_images = int(self.config.get("max_downloaded_candidate_images", 20))
             output_dir = project_root() / "data" / "outputs" / "_web_images" / stable_hash_text(url)
-            paths = self.image_extractor.download_candidate_images(article.image_urls or [], output_dir, max_images)
-            url_by_path = {str(path): image_url for path, image_url in zip(paths, article.image_urls or [])}
+            downloaded = self.image_extractor.download_candidate_images(article.image_urls or [], output_dir, max_images)
+            paths = [path for path, _ in downloaded]
+            url_by_path = {str(path): image_url for path, image_url in downloaded}
             matcher = visual_matcher or LocalVisualMatcher()
             items.extend(
                 self.image_extractor.compare_candidates(

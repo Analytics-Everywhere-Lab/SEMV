@@ -129,14 +129,10 @@ The current codebase already contains the main contestability hooks:
 - `VerificationReport.reflection_logs[*].human_feedback` provides a structured
   place to preserve human feedback during reflection.
 - `report.md` includes a contestation-log section.
-
-Important implementation note: in the current ZIP, the canonical
-`run_case_bundle` path does not yet fully consume `--human-feedback-json` to
-perform automatic targeted re-execution. The README therefore treats the JSON
-above as the intended integration contract for the contestation/revision module.
-A complete implementation should parse the feedback file, map each action to the
-lowest affected stage, re-run downstream stages only, and persist a contested
-report alongside the original report.
+- `--human-feedback-json` is accepted by `scripts/run_case.py` as an alias for
+- `--human_review_path` and is passed into `run_case_bundle`, which applies the
+contestation batch and writes the before/after contestation artifacts alongside
+the final report.
 
 ## Repository Layout
 
@@ -395,9 +391,8 @@ python scripts/run_case.py \
   --human-feedback-json data/feedback/ID333_human_feedback.json
 ```
 
-As noted above, this argument is currently a scaffold for the contestation
-integration. Full adaptive re-execution requires wiring the feedback parser into
-`run_case_bundle`.
+The same feedback file can also be supplied with `--human_review_path`; both
+flags feed the same contestation path.
 
 ## Outputs
 

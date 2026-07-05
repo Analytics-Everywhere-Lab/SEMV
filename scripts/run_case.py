@@ -34,17 +34,18 @@ def main() -> None:
     parser.add_argument("--save_case_trace", default="true")
     parser.add_argument("--exclude_rejected_arguments", default="true")
     args = parser.parse_args()
+    human_review_path = args.human_review_path or args.human_feedback_json
 
     if args.case_bundle:
         path = _resolve(args.case_bundle)
         bundle = load_case_bundle(path)
-        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=path, human_review_path=args.human_review_path, enable_adaptive_revision=_parse_bool(args.enable_adaptive_revision), save_case_trace=_parse_bool(args.save_case_trace), exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments))
+        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=path, human_review_path=human_review_path, enable_adaptive_revision=_parse_bool(args.enable_adaptive_revision), save_case_trace=_parse_bool(args.save_case_trace), exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments))
     elif args.case_path:
         native = _resolve(args.case_path)
         adapter = default_registry().get_adapter(native, args.adapter)
         bundle = adapter.load(native, split=args.split)
         write_canonical_bundle(bundle, args.canonical_root)
-        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=native, human_review_path=args.human_review_path, enable_adaptive_revision=_parse_bool(args.enable_adaptive_revision), save_case_trace=_parse_bool(args.save_case_trace), exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments))
+        report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=native, human_review_path=human_review_path, enable_adaptive_revision=_parse_bool(args.enable_adaptive_revision), save_case_trace=_parse_bool(args.save_case_trace), exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments))
     elif args.case:
         path = _resolve(args.case)
         case = MultimediaCase.model_validate(read_json(path))

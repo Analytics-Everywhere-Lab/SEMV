@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from PIL import Image
 
 from src.utils.hashing import sha256_file, stable_hash_text
@@ -128,6 +128,9 @@ class VisualIndex:
             qvec = self._clip_embedding(query)
             cvec = self._clip_embedding(candidate)
             if qvec is not None and cvec is not None:
+                np = self._numpy_module()
+                if np is None:
+                    return result if result["methods"] else None
                 similarity = float(np.dot(qvec, cvec))
                 if similarity >= self.clip_similarity_threshold:
                     result["clip_similarity"] = similarity
@@ -169,7 +172,8 @@ class VisualIndex:
         if query_vec is None:
             return []
         faiss = self._faiss_module()
-        if faiss is None or not self.clip_index_path.exists():
+        np = self._numpy_module()
+        if faiss is None or np is None or not self.clip_index_path.exists():
             return []
         try:
             index = faiss.read_index(str(self.clip_index_path))
@@ -224,9 +228,10 @@ class VisualIndex:
             for row in rows:
                 handle.write(json.dumps(row, default=str) + "\n")
 
-    def _append_clip_vectors(self, vectors: list[np.ndarray]) -> None:
+    def _append_clip_vectors(self, vectors: list[Any]) -> None:
         faiss = self._faiss_module()
-        if faiss is None:
+        np = self._numpy_module()
+        if faiss is None or np is None:
             return
         matrix = np.asarray(vectors, dtype="float32")
         if self.clip_index_path.exists():
@@ -242,7 +247,7 @@ class VisualIndex:
             return 0
         return max(int(row.get("clip_vector_id", -1)) for row in rows) + 1
 
-    def _clip_embedding(self, path: Path) -> np.ndarray | None:
+    def _clip_embedding(self, path: Path) -> Any | None:
         backend = self._load_clip_backend()
         if backend is None:
             return None
@@ -286,17 +291,62 @@ class VisualIndex:
             return None
 
     @staticmethod
-    def _phash(path: Path) -> str:
-        import imagehash
+    def _numpy_module() -> Any | None:
+        try:
+            import numpy
 
-        with Image.open(path) as image:
-            return str(imagehash.phash(image))
+            return numpy
+        except Exception:
+            return None
+
+    @staticmethod
+    def _phash(path: Path) -> str:
+        try:
+            import imagehash
+
+            with Image.open(path) as image:
+                return str(imagehash.phash(image))
+        except ImportError:
+            return VisualIndex._fallback_phash(path)
 
     @staticmethod
     def _hash_distance(left: str, right: str) -> int:
-        import imagehash
+        try:
+            import imagehash
 
-        return int(abs(imagehash.hex_to_hash(left) - imagehash.hex_to_hash(right)))
+            return int(abs(imagehash.hex_to_hash(left) - imagehash.hex_to_hash(right)))
+        except ImportError:
+            return (int(left, 16) ^ int(right, 16)).bit_count()
+
+    @staticmethod
+    def _fallback_phash(path: Path) -> str:
+        size = 32
+        with Image.open(path) as image:
+            resized = image.convert("L").resize((size, size), Image.Resampling.LANCZOS)
+            pixels = [float(value) for value in resized.getdata()]
+
+        coeffs: list[float] = []
+        for vertical in range(8):
+            for horizontal in range(8):
+                scale = VisualIndex._dct_scale(horizontal, size) * VisualIndex._dct_scale(vertical, size)
+                total = 0.0
+                for y in range(size):
+                    y_basis = math.cos(math.pi * (2 * y + 1) * vertical / (2 * size))
+                    row_offset = y * size
+                    for x in range(size):
+                        x_basis = math.cos(math.pi * (2 * x + 1) * horizontal / (2 * size))
+                        total += pixels[row_offset + x] * x_basis * y_basis
+                coeffs.append(scale * total)
+
+        median = sorted(coeffs[1:])[len(coeffs[1:]) // 2]
+        value = 0
+        for coeff in coeffs:
+            value = (value << 1) | int(coeff > median)
+        return f"{value:016x}"
+
+    @staticmethod
+    def _dct_scale(index: int, size: int) -> float:
+        return math.sqrt(1 / size) if index == 0 else math.sqrt(2 / size)
 
 
 def _merge_match(matches: dict[str, dict[str, Any]], match: dict[str, Any], method: str) -> None:

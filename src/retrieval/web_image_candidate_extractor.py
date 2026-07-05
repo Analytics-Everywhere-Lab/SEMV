@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urljoin, urlparse
 
 import requests
-from bs4 import BeautifulSoup
 from PIL import Image
 
 from src.retrieval.local_reverse_image_search import LocalReverseImageSearch
@@ -26,18 +26,25 @@ class WebImageCandidateExtractor:
         self.min_height = int(self.config.get("web_image_min_height", 120))
 
     def extract_image_urls(self, html: str, base_url: str, limit: int | None = None) -> list[str]:
-        soup = BeautifulSoup(html, "html.parser")
         urls: list[str] = []
-        for tag in soup.find_all("meta"):
-            prop = str(tag.get("property") or tag.get("name") or "").lower()
-            if prop in {"og:image", "twitter:image"}:
-                content = tag.get("content")
-                if content:
-                    urls.append(urljoin(base_url, content))
-        for image in soup.find_all("img"):
-            src = image.get("src") or image.get("data-src") or image.get("data-original")
-            if src:
-                urls.append(urljoin(base_url, src))
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(html, "html.parser")
+            for tag in soup.find_all("meta"):
+                prop = str(tag.get("property") or tag.get("name") or "").lower()
+                if prop in {"og:image", "twitter:image"}:
+                    content = tag.get("content")
+                    if content:
+                        urls.append(urljoin(base_url, content))
+            for image in soup.find_all("img"):
+                src = image.get("src") or image.get("data-src") or image.get("data-original")
+                if src:
+                    urls.append(urljoin(base_url, src))
+        except Exception:
+            parser = _ImageURLParser(base_url)
+            parser.feed(html)
+            urls.extend(parser.urls)
         deduped = []
         seen = set()
         for url in urls:
@@ -54,9 +61,9 @@ class WebImageCandidateExtractor:
         output_dir: Path,
         max_images: int,
         timeout: int = 10,
-    ) -> list[Path]:
+    ) -> list[tuple[Path, str]]:
         output_dir.mkdir(parents=True, exist_ok=True)
-        downloaded: list[Path] = []
+        downloaded: list[tuple[Path, str]] = []
         for url in image_urls[:max_images]:
             try:
                 response = requests.get(url, timeout=timeout, headers={"User-Agent": "SEMV/1.0"})
@@ -75,7 +82,7 @@ class WebImageCandidateExtractor:
                     except OSError:
                         pass
                     continue
-                downloaded.append(path)
+                downloaded.append((path, url))
             except Exception:
                 continue
         return downloaded
@@ -187,3 +194,21 @@ def _web_match_reliability(page_url: str, title: str, phash_distance: int | None
     if strong:
         return 0.70
     return 0.50
+
+
+class _ImageURLParser(HTMLParser):
+    def __init__(self, base_url: str) -> None:
+        super().__init__()
+        self.base_url = base_url
+        self.urls: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): value for key, value in attrs if value}
+        if tag.lower() == "meta":
+            prop = (values.get("property") or values.get("name") or "").lower()
+            if prop in {"og:image", "twitter:image"} and values.get("content"):
+                self.urls.append(urljoin(self.base_url, values["content"]))
+        if tag.lower() == "img":
+            src = values.get("src") or values.get("data-src") or values.get("data-original")
+            if src:
+                self.urls.append(urljoin(self.base_url, src))
