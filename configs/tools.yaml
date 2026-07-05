@@ -35,6 +35,16 @@ media:
 
   enable_forensic_adapter: true
   forensic_engine: "basic"
+  forensic_deep_backend: "trufor"
+  forensic_device: "cuda"
+  forensic_max_targets: 8
+  forensic_manipulation_threshold: 0.50
+  forensic_min_confidence: 0.30
+  forensic_save_maps: true
+  forensic_fallback_to_basic: true
+  forensic_external_repo_dir: "external/TruFor/TruFor_train_test"
+  forensic_trufor_weights: "external/TruFor/TruFor_train_test/pretrained_models/trufor.pth.tar"
+  forensic_trufor_experiment: "trufor_ph3"
 
   enable_local_reverse_search: true
   local_reverse_methods: ["phash", "clip_faiss"]

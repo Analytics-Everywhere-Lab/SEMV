@@ -6,7 +6,7 @@ from typing import Iterable
 
 from src.schemas.evidence_schema import EvidenceItem, Provenance
 from src.utils.hashing import stable_hash_text
-from src.utils.llm_client import VLLMOpenAIClient
+from src.utils.llm_client import LLMClient, build_llm_client
 from src.utils.tool_config import media_config
 
 
@@ -14,9 +14,9 @@ VLM_PROMPT = """Return strict JSON about this image/frame with keys: scene_summa
 
 
 class VLMVisualAnalyzer:
-    def __init__(self, config: dict | None = None) -> None:
+    def __init__(self, config: dict | None = None, llm_client: LLMClient | None = None) -> None:
         self.config = media_config(config)
-        self.llm_client = VLLMOpenAIClient()
+        self.llm_client = llm_client or build_llm_client()
 
     def analyze(
         self,

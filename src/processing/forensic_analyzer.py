@@ -29,11 +29,6 @@ class ForensicAnalyzer:
         engine = self.config.get("forensic_engine", "basic")
         if engine == "disabled":
             return [self._uncertainty_item(media.path, "forensic_adapter_disabled")]
-        if engine == "trufor":
-            try:
-                import trufor  # type: ignore  # noqa: F401
-            except Exception:
-                return [self._uncertainty_item(media.path, "trufor_adapter_unavailable")]
 
         output_dir.mkdir(parents=True, exist_ok=True)
         targets = [Path(path) for path in visual_targets]
@@ -43,6 +38,31 @@ class ForensicAnalyzer:
         if not targets:
             return [self._uncertainty_item(media.path, "forensic_media_missing")]
 
+        if engine in {"trufor", "deep"}:
+            return self._analyze_deep(
+                media=media,
+                targets=targets,
+                output_dir=output_dir,
+                base_dir=base_dir,
+                metadata_items=metadata_items,
+            )
+
+        return self._analyze_basic(
+            media=media,
+            targets=targets,
+            output_dir=output_dir,
+            base_dir=base_dir,
+            metadata_items=metadata_items,
+        )
+
+    def _analyze_basic(
+        self,
+        media: MediaItem,
+        targets: list[Path],
+        output_dir: Path,
+        base_dir: Path | None,
+        metadata_items: list[EvidenceItem] | None,
+    ) -> list[EvidenceItem]:
         flags = self._metadata_flags(metadata_items or [])
         ela_paths = []
         noise_scores = []
@@ -93,6 +113,110 @@ class ForensicAnalyzer:
                     source_type="forensic_analysis",
                     source=media.path,
                     retrieval_method="basic_forensics",
+                ),
+            )
+        ]
+
+    def _analyze_deep(
+        self,
+        media: MediaItem,
+        targets: list[Path],
+        output_dir: Path,
+        base_dir: Path | None,
+        metadata_items: list[EvidenceItem] | None,
+    ) -> list[EvidenceItem]:
+        from src.processing.deep_forensics.trufor_backend import TruForBackend
+
+        max_targets = int(self.config.get("forensic_max_targets", 8))
+        candidates = [target for target in targets if target.exists()][:max_targets]
+
+        if not candidates:
+            return [self._uncertainty_item(media.path, "deep_forensic_no_valid_targets")]
+
+        try:
+            backend = TruForBackend(self.config)
+            results = backend.analyze_images(candidates, output_dir / "trufor")
+        except Exception:
+            if self.config.get("forensic_fallback_to_basic", True):
+                items = self._analyze_basic(
+                    media=media,
+                    targets=candidates,
+                    output_dir=output_dir / "basic_fallback",
+                    base_dir=base_dir,
+                    metadata_items=metadata_items,
+                )
+                for item in items:
+                    item.uncertainty_flags = sorted(set(item.uncertainty_flags) | {"deep_forensic_backend_unavailable"})
+                    item.metadata["deep_forensic_fallback"] = True
+                return items
+            return [self._uncertainty_item(media.path, "deep_forensic_backend_unavailable")]
+
+        scores = [result.manipulation_score for result in results if result.manipulation_score is not None]
+        max_score = max(scores) if scores else None
+        mean_score = (sum(scores) / len(scores)) if scores else None
+
+        threshold = float(self.config.get("forensic_manipulation_threshold", 0.50))
+        high_results = [
+            result
+            for result in results
+            if result.manipulation_score is not None and result.manipulation_score >= threshold
+        ]
+
+        flags = sorted({flag for result in results for flag in result.flags})
+
+        if high_results:
+            strongest = max(high_results, key=lambda result: result.manipulation_score or 0.0)
+            summary = (
+                f"Deep forensic analysis using TruFor found manipulation cues in "
+                f"{len(high_results)}/{len(results)} visual targets. "
+                f"Max score={max_score:.3f}. Strongest target={Path(strongest.target_path).name}. "
+                "Treat this as forensic evidence, not final proof."
+            )
+        elif scores:
+            summary = (
+                f"Deep forensic analysis using TruFor did not find strong manipulation cues. "
+                f"Max score={max_score:.3f}, mean score={mean_score:.3f}."
+            )
+        else:
+            summary = "Deep forensic analysis using TruFor ran, but no valid manipulation score was produced."
+            flags = sorted(set(flags) | {"deep_forensic_no_valid_score"})
+
+        evidence_id = f"forensic_deep_{stable_hash_text(media.path + summary)}"
+
+        return [
+            EvidenceItem(
+                evidence_id=evidence_id,
+                source_type="forensic_analysis",
+                source=media.path,
+                title="Deep forensic analysis",
+                content=summary,
+                reliability=0.72,
+                relevance=0.85,
+                media_path=media.path,
+                confidence=max_score,
+                metadata={
+                    "engine": "trufor",
+                    "backend": "deep_forensics",
+                    "target_count": len(results),
+                    "max_manipulation_score": max_score,
+                    "mean_manipulation_score": mean_score,
+                    "strongest_target": (
+                        Path(high_results[0].target_path).name if high_results else None
+                    ),
+                    "threshold": threshold,
+                    "results": [result.__dict__ for result in results],
+                    "anomaly_map_paths": [r.anomaly_map_path for r in results if r.anomaly_map_path],
+                    "confidence_map_paths": [r.confidence_map_path for r in results if r.confidence_map_path],
+                    "heatmap_overlay_paths": [r.heatmap_overlay_path for r in results if r.heatmap_overlay_path],
+                },
+                uncertainty_flags=flags,
+                supports_claim_types=["authenticity"],
+                provenance=Provenance(
+                    source_id=evidence_id,
+                    source_type="forensic_analysis",
+                    source=media.path,
+                    retrieval_method="deep_forensics_trufor",
+                    metadata={"engine": "trufor"},
                 ),
             )
         ]

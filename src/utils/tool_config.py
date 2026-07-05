@@ -41,6 +41,16 @@ _DEFAULT_TOOLS_CONFIG: dict[str, Any] = {
         "asr_language": None,
         "enable_forensic_adapter": True,
         "forensic_engine": "basic",
+        "forensic_deep_backend": "trufor",
+        "forensic_device": "cuda",
+        "forensic_max_targets": 8,
+        "forensic_manipulation_threshold": 0.50,
+        "forensic_min_confidence": 0.30,
+        "forensic_save_maps": True,
+        "forensic_fallback_to_basic": True,
+        "forensic_external_repo_dir": "external/TruFor/TruFor_train_test",
+        "forensic_trufor_weights": "external/TruFor/TruFor_train_test/pretrained_models/trufor.pth.tar",
+        "forensic_trufor_experiment": "trufor_ph3",
         "enable_local_reverse_search": True,
         "local_reverse_methods": ["phash", "clip_faiss"],
         "visual_index_dir": "data/visual_index",
@@ -64,6 +74,11 @@ def load_tools_config() -> dict[str, Any]:
     _env_bool(media, "enable_ocr_adapter", "SEMV_ENABLE_OCR")
     _env_bool(media, "enable_asr_adapter", "SEMV_ENABLE_ASR")
     _env_bool(media, "enable_forensic_adapter", "SEMV_ENABLE_FORENSICS")
+    _env_str(media, "forensic_engine", "SEMV_FORENSIC_ENGINE")
+    _env_str(media, "forensic_deep_backend", "SEMV_FORENSIC_DEEP_BACKEND")
+    _env_str(media, "forensic_device", "SEMV_FORENSIC_DEVICE")
+    _env_str(media, "forensic_external_repo_dir", "SEMV_TRUFOR_REPO_DIR")
+    _env_str(media, "forensic_trufor_weights", "SEMV_TRUFOR_WEIGHTS")
     _env_bool(media, "enable_local_reverse_search", "SEMV_ENABLE_LOCAL_REVERSE")
     _env_bool(retrieval, "free_web_search_enabled", "SEMV_ENABLE_FREE_WEB_SEARCH")
     return config

@@ -76,7 +76,7 @@ def run_case_bundle(
     legacy_case = case_bundle_to_multimedia_case(bundle)
 
     logger.info("[1/8] Raw media processing")
-    raw_evidence = RawMediaProcessor().process(legacy_case, case_path=case_path)
+    raw_evidence = RawMediaProcessor(llm_client=shared_llm_client).process(legacy_case, case_path=case_path)
     raw_evidence.extend(legacy_case.provided_evidence)
 
     logger.info("[3/8] Claim decomposition")

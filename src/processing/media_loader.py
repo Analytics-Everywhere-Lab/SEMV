@@ -13,20 +13,26 @@ from src.retrieval.local_reverse_image_search import LocalReverseImageSearch
 from src.schemas.case_schema import MediaItem, MultimediaCase
 from src.schemas.evidence_schema import EvidenceItem
 from src.utils.io import project_root
+from src.utils.llm_client import LLMClient
 from src.utils.tool_config import load_tools_config, media_config
 
 logger = logging.getLogger("run_case")
 
 
 class RawMediaProcessor:
-    def __init__(self, output_dir: Path | None = None, config: dict | None = None) -> None:
+    def __init__(
+        self,
+        output_dir: Path | None = None,
+        config: dict | None = None,
+        llm_client: LLMClient | None = None,
+    ) -> None:
         self.output_dir = output_dir or project_root() / "data" / "outputs" / "_media"
         self.config = config or load_tools_config()
         self.media_config = media_config(self.config)
         self.metadata_extractor = MetadataExtractor()
         self.scene_keyframe_extractor = SceneKeyframeExtractor()
         self.ocr_extractor = OCRExtractor(self.config)
-        self.vlm_visual_analyzer = VLMVisualAnalyzer(self.config)
+        self.vlm_visual_analyzer = VLMVisualAnalyzer(self.config, llm_client=llm_client)
         self.forensic_analyzer = ForensicAnalyzer(self.config)
         self.asr_extractor = ASRExtractor(self.config)
         self.local_reverse_search = LocalReverseImageSearch(config=self.config)

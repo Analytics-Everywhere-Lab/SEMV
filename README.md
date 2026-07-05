@@ -205,7 +205,7 @@ in a separate environment from the rest of SEMV's dependencies, since vLLM
 pulls in heavy CUDA/Torch requirements:
 
 ```bash
-uv pip install vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly
+uv pip install vllm --torch-backend=auto
 ```
 
 ```bash
@@ -400,13 +400,14 @@ python scripts/run_case.py \
 For an offline smoke run with heavy model adapters disabled:
 
 ```bash
-SEMV_ENABLE_OCR=false \
-SEMV_ENABLE_ASR=false \
-SEMV_ENABLE_VLM=false \
+SEMV_ENABLE_FREE_WEB_SEARCH=true \
+SEMV_ENABLE_OCR=true \
+SEMV_ENABLE_ASR=true \
+SEMV_ENABLE_VLM=true \
 SEMV_ENABLE_FORENSICS=true \
 SEMV_ENABLE_LOCAL_REVERSE=true \
 python scripts/run_case.py \
-  --case-path data/raw/mv2026/ID333 \
+  --case-path data/raw/mv2026/training/ID333 \
   --adapter mv2026_folder \
   --split validation \
   --mode inference_only

@@ -6,6 +6,7 @@ from src.processing.vlm_visual_analyzer import VLMVisualAnalyzer
 from src.schemas.case_schema import MediaItem
 from src.schemas.evidence_schema import EvidenceItem, Provenance
 from src.utils.hashing import stable_hash_text
+from src.utils.llm_client import LLMClient
 
 
 class VisualDescriber:
@@ -15,8 +16,8 @@ class VisualDescriber:
     media pipeline now uses VLMVisualAnalyzer directly for grounded frame evidence.
     """
 
-    def __init__(self, config: dict | None = None) -> None:
-        self.vlm = VLMVisualAnalyzer(config)
+    def __init__(self, config: dict | None = None, llm_client: LLMClient | None = None) -> None:
+        self.vlm = VLMVisualAnalyzer(config, llm_client=llm_client)
 
     def describe(self, media: MediaItem, metadata: dict) -> EvidenceItem:
         path = Path(metadata.get("path", media.path))
