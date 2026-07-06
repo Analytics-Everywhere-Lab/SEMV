@@ -43,7 +43,12 @@ class ReportGenerator:
             memory_used=memory_used,
             uncertainty_flags=uncertainty_flags,
             media_analysis=_media_analysis_summary(evidence),
-            metadata={"claim": case.claim, "context": case.context},
+            metadata={
+                "claim": case.claim,
+                "context": case.context,
+                "decision_confidence": final_confidence if final_status != "uncertain" else 1.0 - final_confidence,
+                "uncertainty_score": final_confidence if final_status == "uncertain" else 1.0 - final_confidence,
+            },
         )
 
 

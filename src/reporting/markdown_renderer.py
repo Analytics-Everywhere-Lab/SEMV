@@ -18,6 +18,17 @@ class MarkdownRenderer:
             "## Final Verification Status",
             f"- Final status: **{report.final_status}**",
             f"- Final confidence: **{report.final_confidence:.2f}**",
+        ]
+        if report.final_status == "uncertain":
+            uncertainty_score = report.metadata.get("uncertainty_score", report.final_confidence)
+            lines.append(
+                f"  (this is confidence that the case is genuinely uncertain, "
+                f"i.e. uncertainty_score={uncertainty_score:.2f} — not confidence in a verdict)"
+            )
+        else:
+            decision_confidence = report.metadata.get("decision_confidence", report.final_confidence)
+            lines.append(f"- Decision confidence: **{decision_confidence:.2f}**")
+        lines += [
             "",
             "## Content Classification / Tags",
             f"- Dataset: {report.metadata.get('dataset', {}).get('dataset_name', 'unknown') if isinstance(report.metadata.get('dataset'), dict) else 'unknown'}",
