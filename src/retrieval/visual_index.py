@@ -323,7 +323,7 @@ class VisualIndex:
         size = 32
         with Image.open(path) as image:
             resized = image.convert("L").resize((size, size), Image.Resampling.LANCZOS)
-            pixels = [float(value) for value in resized.getdata()]
+            pixels = [float(value) for value in resized.tobytes()]
 
         coeffs: list[float] = []
         for vertical in range(8):

@@ -77,6 +77,7 @@ def main() -> None:
             human_review_path=human_review_path,
             enable_adaptive_revision=_parse_optional_bool(args.enable_adaptive_revision),
             exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments),
+            config_path=args.config,
         )
         logger.info("Pipeline finished")
     else:

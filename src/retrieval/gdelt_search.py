@@ -139,6 +139,7 @@ class GDELTSearch:
         seen_urls: set[str] = set()
         max_records = int(self.config.get("gdelt_max_records_per_claim", 8))
         fetch_full = bool(self.config.get("gdelt_fetch_full_articles", True))
+        min_relevance = float(self.config.get("gdelt_min_relevance", 0.0))
 
         for query in search_queries:
             gdelt_query = _gdelt_query(query, source_lang)
@@ -181,10 +182,11 @@ class GDELTSearch:
                 if not url or url in seen_urls:
                     continue
                 seen_urls.add(url)
-                evidence.append(
-                    self._item_for_article(claim=claim, query=query, article=article, fetch_full=fetch_full)
-                )
-                if len(seen_urls) >= max_records:
+                item = self._item_for_article(claim=claim, query=query, article=article, fetch_full=fetch_full)
+                if item.relevance < min_relevance:
+                    continue
+                evidence.append(item)
+                if len(evidence) >= max_records:
                     break
 
         logger.info(

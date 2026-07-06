@@ -344,6 +344,7 @@ def run_case(
     human_review_path: str | Path | None = None,
     enable_adaptive_revision: bool | None = None,
     exclude_rejected_arguments: bool = True,
+    config_path: str = "configs/default.yaml",
 ) -> VerificationReport:
     bundle = multimedia_case_to_case_bundle(case)
     if ground_truth_label or subclaim_labels:
@@ -361,6 +362,7 @@ def run_case(
     return run_case_bundle(
         bundle=bundle,
         mode=mode,
+        config_path=config_path,
         llm_client=llm_client,
         case_path=case_path,
         human_review_path=human_review_path,

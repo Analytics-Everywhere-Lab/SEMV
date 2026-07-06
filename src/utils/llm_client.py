@@ -166,6 +166,11 @@ class VLLMOpenAIClient:
                 f"vLLM call timed out after {timeout}s. "
                 "Check that the vLLM server is running and reachable."
             ) from exc
+        except requests.exceptions.ConnectionError as exc:
+            raise RuntimeError(
+                f"Could not connect to vLLM at {self.base_url}. "
+                "Check that the vLLM server is running and VLLM_BASE_URL is correct."
+            ) from exc
         response.raise_for_status()
         logger.info("vLLM response received")
 

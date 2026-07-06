@@ -153,10 +153,10 @@ The current codebase already contains the main contestability hooks:
   place to preserve human feedback during reflection.
 - `report.md` includes a contestation-log section.
 - `--human-feedback-json` is accepted by `scripts/run_case.py` as an alias for
-- `--human_review_path` and is passed into `run_case_bundle`, which routes the
-contestation batch via `route_revision`, reruns only the affected pipeline
-stage and its downstream steps via `execute_adaptive_revision`, and writes the
-before/after contestation artifacts alongside the final report.
+  `--human_review_path` and is passed into `run_case_bundle`, which routes the
+  contestation batch via `route_revision`, reruns only the affected pipeline
+  stage and its downstream steps via `execute_adaptive_revision`, and writes the
+  before/after contestation artifacts alongside the final report.
 
 ## Repository Layout
 
@@ -174,7 +174,7 @@ src/ingestion/            Dataset adapters and canonical bundle writer
 src/memory/               Memory retrieval, verification, consolidation, seeding
 src/planning/             Claim decomposition and research planning
 src/processing/           Media loading, metadata, OCR, ASR, VLM, forensics, keyframes
-src/A-QBAF/                 A-QBAF graph construction, propagation, decision mapping
+src/qbaf/                 A-QBAF graph construction, propagation, decision mapping
 src/reflection/           Failure analysis and memory-update candidate generation
 src/reporting/            JSON and Markdown report rendering
 tests/                    Unit and integration tests
@@ -625,6 +625,11 @@ and geolocation-clue evidence before the generic evidence pool. Intermediate
 artifacts are written to support inspection, ablation analysis, human
 contestation, and error analysis.
 
+`report.final_confidence` is the confidence in `report.final_status`,
+including when that status is itself `"uncertain"` — e.g.
+`final_status="uncertain", final_confidence=0.8` means high confidence that
+the case is genuinely uncertain, not 80% confidence in a definite verdict.
+
 Media-derived working files are written under:
 
 ```text
@@ -638,17 +643,18 @@ forensic outputs such as ELA images. Verify a completed case directory with:
 python scripts/check_case_outputs.py data/outputs/cases/ID333
 ```
 
-For a full contestation implementation, the recommended additional artifacts are:
+When a human review batch is supplied, the case runner also writes contestation
+artifacts to the same output directory:
 
 ```text
-contestation_package.json
-human_feedback.json
+human_review_batch.json
 revision_plan.json
-contested_report.json
-contested_report.md
+report_before_contestation.json
+report_after_contestation.json
+contestation_diff.json
 ```
 
-These artifacts should preserve the original prediction and make the human-led
+These artifacts preserve the original prediction and make the human-led
 revision auditable rather than overwriting the first-pass output.
 
 ## Evaluation Protocols

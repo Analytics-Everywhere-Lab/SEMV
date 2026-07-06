@@ -40,6 +40,9 @@ class VerificationReport(BaseModel):
 
     case_id: str
     final_status: str
+    # Confidence in `final_status`, including the "uncertain" label itself -
+    # e.g. final_status="uncertain", final_confidence=0.8 means high confidence
+    # that the case is genuinely uncertain, not 80% confidence in a verdict.
     final_confidence: float
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     subclaim_reports: list[SubClaimReport] = Field(default_factory=list)
