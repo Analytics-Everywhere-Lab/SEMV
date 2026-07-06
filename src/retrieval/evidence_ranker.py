@@ -22,4 +22,5 @@ class EvidenceRanker:
             uncertainty_penalty = 0.15 if item.uncertainty_flags else 0.0
             return item.relevance + item.reliability + claim_type_bonus + overlap_bonus - uncertainty_penalty
 
-        return sorted(evidence, key=score, reverse=True)[:top_k]
+        usable_evidence = [item for item in evidence if not item.excluded_by_human]
+        return sorted(usable_evidence, key=score, reverse=True)[:top_k]

@@ -266,6 +266,9 @@ def case_bundle_to_multimedia_case(bundle: CaseBundle) -> MultimediaCase:
         for asset in bundle.media_assets
         if not asset.is_gold_only and asset.role != "report_attachment"
     ]
+    # This case feeds the prediction pipeline directly, so gold must never travel
+    # with it -- evaluation/reflection read gold from the original CaseBundle instead.
+    prediction_bundle = bundle.model_copy(update={"gold": GoldAnnotation()})
     return MultimediaCase(
         case_id=bundle.case_id,
         claim=bundle.primary_claim_text(),
@@ -276,12 +279,10 @@ def case_bundle_to_multimedia_case(bundle: CaseBundle) -> MultimediaCase:
             for item in bundle.provided_evidence
             if not item.is_gold_only
         ],
-        expected_label=bundle.gold.gold_final_label,
-        subclaim_labels=bundle.gold.gold_subclaim_labels,
         metadata={
             "dataset": bundle.dataset.model_dump(mode="json"),
             "task": bundle.task.model_dump(mode="json"),
-            "case_bundle": bundle.model_dump(mode="json"),
+            "case_bundle": prediction_bundle.model_dump(mode="json"),
         },
     )
 

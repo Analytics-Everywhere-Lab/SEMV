@@ -37,6 +37,7 @@ class HumanArgumentContestation(BaseModel):
     edited_text: str | None = None
     edited_stance: str | None = None
     edited_confidence: float | None = None
+    edited_evidence_ids: list[str] | None = None
 
     added_subclaim_id: str | None = None
     added_text: str | None = None

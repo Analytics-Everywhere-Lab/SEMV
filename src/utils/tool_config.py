@@ -80,9 +80,11 @@ _DEFAULT_TOOLS_CONFIG: dict[str, Any] = {
 }
 
 
-def load_tools_config() -> dict[str, Any]:
+def load_tools_config(config_path: str = "configs/tools.yaml") -> dict[str, Any]:
     config = deepcopy(_DEFAULT_TOOLS_CONFIG)
     _deep_update(config, read_yaml("configs/tools.yaml"))
+    if config_path != "configs/tools.yaml":
+        _deep_update(config, read_yaml(config_path))
     media = config.setdefault("media", {})
     retrieval = config.setdefault("retrieval", {})
 

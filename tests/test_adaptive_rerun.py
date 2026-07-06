@@ -53,6 +53,92 @@ def test_adaptive_rerun_from_qbaf_applies_human_review():
     assert all(arg.argument_id != "arg_support" for arg in report.subclaim_reports[0].top_support_arguments)
 
 
+def test_claim_decomposition_rerun_regenerates_subclaims_and_arguments():
+    trace = CaseTrace(
+        case_id="case_1",
+        subclaims=[SubClaim(claim_id="subclaim_1", claim_type="what", statement="Scene happened")],
+        validated_evidence_items=[EvidenceItem(evidence_id="ev_1", content="known", reliability=0.9, relevance=0.9)],
+        arguments=[Argument(argument_id="arg_support", claim_id="subclaim_1", stance="support", text="strong", evidence_ids=["ev_1"], score=0.9)],
+    )
+    batch = HumanReviewBatch(
+        case_id="case_1",
+        contestations=[
+            HumanArgumentContestation(
+                contestation_id="c1",
+                case_id="case_1",
+                action="reject",
+                target_argument_id="arg_support",
+                reason="The subclaim decomposition is wrong.",
+                metadata={"revision_target": "claim_decomposition"},
+            )
+        ],
+    )
+
+    report = run_from_step(_bundle(), "claim_decomposition", previous_state=trace, human_review_batch=batch, llm_client=FakeLLMClient())
+
+    assert report.revision_plan.rerun_from_step == "claim_decomposition"
+    claim_types = {r.claim_type for r in report.subclaim_reports}
+    assert claim_types == {"what", "where", "when", "who", "why", "authenticity"}
+
+    all_arg_ids = {
+        arg.argument_id
+        for r in report.subclaim_reports
+        for arg in [*r.top_support_arguments, *r.top_attack_arguments]
+    }
+    assert "arg_support" not in all_arg_ids
+
+
+def test_evidence_validation_rejection_excludes_evidence_from_regenerated_arguments():
+    trace = _two_claim_trace()
+    batch = HumanReviewBatch(
+        case_id="case_1",
+        contestations=[
+            HumanArgumentContestation(
+                contestation_id="c1",
+                case_id="case_1",
+                action="reject",
+                target_argument_id="arg_1",
+                reason="The evidence does not support this claim.",
+            )
+        ],
+    )
+
+    report = run_from_step(_two_claim_bundle(), "evidence_validation", previous_state=trace, human_review_batch=batch, llm_client=FakeLLMClient())
+
+    evidence_by_id = {item.evidence_id: item for item in report.evidence}
+    assert evidence_by_id["ev_1"].excluded_by_human is True
+    assert evidence_by_id["ev_1"].human_status == "rejected"
+
+    subclaim_1_report = next(r for r in report.subclaim_reports if r.claim_id == "subclaim_1")
+    regenerated_args = [*subclaim_1_report.top_support_arguments, *subclaim_1_report.top_attack_arguments]
+    assert all("ev_1" not in arg.evidence_ids for arg in regenerated_args if arg.human_status == "unreviewed")
+
+
+def test_edited_evidence_ids_are_applied_to_argument():
+    trace = _two_claim_trace()
+    batch = HumanReviewBatch(
+        case_id="case_1",
+        contestations=[
+            HumanArgumentContestation(
+                contestation_id="c1",
+                case_id="case_1",
+                action="edit",
+                target_argument_id="arg_1",
+                edited_text="corrected wording",
+                edited_evidence_ids=["ev_2"],
+            )
+        ],
+    )
+
+    report = run_from_step(_two_claim_bundle(), "argument_construction", previous_state=trace, human_review_batch=batch, llm_client=FakeLLMClient())
+
+    subclaim_1_report = next(r for r in report.subclaim_reports if r.claim_id == "subclaim_1")
+    all_args = [*subclaim_1_report.top_support_arguments, *subclaim_1_report.top_attack_arguments]
+    edited = next(arg for arg in all_args if arg.human_status == "edited" and arg.human_original_argument_id)
+    assert edited.evidence_ids == ["ev_2"]
+    assert edited.metadata.get("pre_contestation_evidence_ids") == ["ev_1"]
+
+
 def test_report_renders_human_contestation():
     batch = HumanReviewBatch(case_id="case_1", contestations=[HumanArgumentContestation(contestation_id="c1", case_id="case_1", action="reject", target_argument_id="arg_1", reason="bad evidence")])
     plan = RevisionPlan(case_id="case_1", revision_target="evidence_validation", rerun_from_step="evidence_validation", affected_argument_ids=["arg_1"], rationale="bad evidence")

@@ -67,8 +67,8 @@ class FinalDecisionAggregator:
             1 for report in subclaim_reports if report.decision == "uncertain"
         )
         if uncertain_count >= max(1, len(subclaim_reports) // 2):
-            return "uncertain", round(1.0 - min(confidence, 1.0), 4)
+            return "uncertain", min(confidence, 1.0)
 
         if aggregate_score < 0.45:
             return "insufficient_evidence", max(confidence, 0.35)
-        return "uncertain", round(1.0 - min(confidence, 1.0), 4)
+        return "uncertain", min(confidence, 1.0)

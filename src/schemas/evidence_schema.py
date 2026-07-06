@@ -69,6 +69,8 @@ class EvidenceItem(BaseModel):
     uncertainty_flags: list[str] = Field(default_factory=list)
     supports_claim_types: list[str] = Field(default_factory=list)
     provenance: Provenance | None = None
+    human_status: Literal["unreviewed", "contested", "rejected"] = "unreviewed"
+    excluded_by_human: bool = False
 
 
 class EvidenceGraph(BaseModel):

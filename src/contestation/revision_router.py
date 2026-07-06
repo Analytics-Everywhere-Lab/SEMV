@@ -54,7 +54,7 @@ def route_revision(
     rationale_parts: list[str] = []
 
     for contestation in review_batch.contestations:
-        target = _target_for_contestation(contestation, arguments_by_id, existing_evidence_ids)
+        target = target_for_contestation(contestation, arguments_by_id, existing_evidence_ids)
         selected_targets.append(target)
         rationale_parts.append(
             f"{contestation.action} {contestation.target_argument_id or contestation.added_subclaim_id or contestation.contestation_id} -> {target}"
@@ -72,6 +72,8 @@ def route_revision(
         if contestation.added_subclaim_id:
             affected_subclaim_ids.add(contestation.added_subclaim_id)
         affected_evidence_ids.update(contestation.added_evidence_ids)
+        if contestation.edited_evidence_ids:
+            affected_evidence_ids.update(contestation.edited_evidence_ids)
 
     if final_still_contested:
         selected_targets.append("qbaf_reasoning")
@@ -92,7 +94,7 @@ def route_revision(
     )
 
 
-def _target_for_contestation(contestation, arguments_by_id, existing_evidence_ids) -> RevisionTarget:
+def target_for_contestation(contestation, arguments_by_id, existing_evidence_ids) -> RevisionTarget:
     explicit_target = contestation.metadata.get("revision_target")
     if explicit_target in STEP_ORDER:
         return explicit_target
@@ -111,7 +113,10 @@ def _target_for_contestation(contestation, arguments_by_id, existing_evidence_id
     if contestation.action == "edit":
         argument = arguments_by_id.get(contestation.target_argument_id)
         known_evidence = set(argument.evidence_ids) if argument else set()
-        edited_evidence = set(contestation.metadata.get("edited_evidence_ids", []))
+        edited_evidence_ids = contestation.edited_evidence_ids
+        if edited_evidence_ids is None:
+            edited_evidence_ids = contestation.metadata.get("edited_evidence_ids", [])
+        edited_evidence = set(edited_evidence_ids)
         if edited_evidence and not edited_evidence.issubset(known_evidence):
             return "evidence_retrieval"
         return "argument_construction"

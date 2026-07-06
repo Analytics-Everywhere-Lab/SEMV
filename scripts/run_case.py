@@ -51,7 +51,7 @@ def main() -> None:
     if args.case_bundle:
         path = _resolve(args.case_bundle)
         bundle = load_case_bundle(path)
-        logger.info("Loaded case_id=%s with %d media item(s)", bundle.case_id, len(bundle.media))
+        logger.info("Loaded case_id=%s with %d media item(s)", bundle.case_id, len(bundle.media_assets))
         logger.info("Starting pipeline...")
         report = run_case_bundle(bundle=bundle, mode=args.mode, config_path=args.config, case_path=path, human_review_path=human_review_path, enable_adaptive_revision=_parse_optional_bool(args.enable_adaptive_revision), save_case_trace=_parse_bool(args.save_case_trace), exclude_rejected_arguments=_parse_bool(args.exclude_rejected_arguments))
         logger.info("Pipeline finished")

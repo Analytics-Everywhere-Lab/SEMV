@@ -131,11 +131,27 @@ def _apply_edit(
         result.append(original)
 
         replacement_id = _unique_argument_id(f"{argument.argument_id}_human", arguments)
+        edited_evidence_ids = contestation.edited_evidence_ids
+        if edited_evidence_ids is None:
+            edited_evidence_ids = contestation.metadata.get("edited_evidence_ids")
+        replacement_metadata = {
+            **argument.metadata,
+            "human_edit_replacement": True,
+            "contestation_id": contestation.contestation_id,
+            "human_reason": contestation.reason,
+        }
+        if edited_evidence_ids is not None:
+            replacement_metadata["pre_contestation_evidence_ids"] = list(argument.evidence_ids)
         replacement = argument.model_copy(
             update={
                 "argument_id": replacement_id,
                 "text": contestation.edited_text or argument.text,
                 "stance": _valid_stance(contestation.edited_stance) or argument.stance,
+                "evidence_ids": (
+                    list(edited_evidence_ids)
+                    if edited_evidence_ids is not None
+                    else argument.evidence_ids
+                ),
                 "intrinsic_score": (
                     contestation.edited_confidence
                     if contestation.edited_confidence is not None
@@ -148,12 +164,7 @@ def _apply_edit(
                 ),
                 "human_status": "edited",
                 "human_original_argument_id": argument.argument_id,
-                "metadata": {
-                    **argument.metadata,
-                    "human_edit_replacement": True,
-                    "contestation_id": contestation.contestation_id,
-                    "human_reason": contestation.reason,
-                },
+                "metadata": replacement_metadata,
             }
         )
         result.append(replacement)

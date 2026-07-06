@@ -10,6 +10,8 @@ from src.argumentation.clash_resolver import ClashResolver
 from src.contestation.contestation_applier import apply_human_contestations
 from src.evidence.evidence_graph import EvidenceGraphBuilder
 from src.evidence.evidence_normalizer import EvidenceNormalizer
+from src.memory.memory_retriever import MemoryRetriever
+from src.planning.claim_decomposer import ClaimDecomposer
 from src.qbaf.decision_mapper import DecisionMapper
 from src.qbaf.graph_builder import QBAFGraphBuilder
 from src.qbaf.propagator import QBAFPropagator
@@ -210,6 +212,39 @@ def _attach_argument_provenance(
     return argument.model_copy(update={"provenance": provenance})
 
 
+def _evidence_ids_rejected_by_human(
+    review_batch: HumanReviewBatch,
+    arguments_by_id: dict[str, Argument],
+) -> set[str]:
+    from src.contestation.revision_router import target_for_contestation
+
+    rejected: set[str] = set()
+    for contestation in review_batch.contestations:
+        if contestation.action != "reject":
+            continue
+        target = target_for_contestation(contestation, arguments_by_id, set())
+        if target != "evidence_validation":
+            continue
+        argument = arguments_by_id.get(contestation.target_argument_id)
+        if argument:
+            rejected.update(argument.evidence_ids)
+    return rejected
+
+
+def _mark_evidence_excluded(
+    evidence: list[EvidenceItem],
+    excluded_ids: set[str],
+) -> list[EvidenceItem]:
+    if not excluded_ids:
+        return evidence
+    return [
+        item.model_copy(update={"human_status": "rejected", "excluded_by_human": True})
+        if item.evidence_id in excluded_ids
+        else item
+        for item in evidence
+    ]
+
+
 def _tag_evidence_for_retrieval_rerun(
     evidence: list[EvidenceItem],
     claim_id: str,
@@ -284,7 +319,29 @@ def execute_adaptive_revision(
 
     reviewed_arguments = apply_human_contestations(original_arguments, review_batch)
 
+    original_arguments_by_id = {argument.argument_id: argument for argument in original_arguments}
+    rejected_evidence_ids = _evidence_ids_rejected_by_human(review_batch, original_arguments_by_id)
+    if rejected_evidence_ids:
+        all_evidence = _mark_evidence_excluded(all_evidence, rejected_evidence_ids)
+        normalized_evidence = _mark_evidence_excluded(normalized_evidence, rejected_evidence_ids)
+
     step = revision_plan.rerun_from_step
+
+    if step == "claim_decomposition":
+        logger.info("Human contestation routed to claim_decomposition")
+        return _rerun_from_claim_decomposition(
+            bundle=bundle,
+            legacy_case=legacy_case,
+            claims=claims,
+            raw_evidence=raw_evidence,
+            all_evidence=all_evidence,
+            memory_by_claim=memory_by_claim,
+            reviewed_arguments=reviewed_arguments,
+            research_plans=research_plans,
+            revision_plan=revision_plan,
+            llm_client=llm_client,
+            exclude_rejected_arguments=exclude_rejected_arguments,
+        )
 
     if step == "qbaf_reasoning":
         logger.info("Human contestation routed to qbaf_reasoning")
@@ -461,8 +518,8 @@ def execute_adaptive_revision(
         )
         return report, qbaf_graphs, final_arguments, re_normalized_evidence, re_evidence_graph
 
-    # Fallback: unknown / downstream-only step (final_aggregation, report_generation,
-    # claim_decomposition) -- treat like qbaf_reasoning since arguments are unaffected.
+    # Fallback: unknown / downstream-only step (final_aggregation, report_generation)
+    # -- treat like qbaf_reasoning since arguments are unaffected.
     logger.info("Human contestation routed to %s; falling back to qbaf_reasoning rerun", step)
     report, qbaf_graphs, final_arguments = _rerun_qbaf_and_report_all_claims(
         legacy_case=legacy_case,
@@ -476,6 +533,102 @@ def execute_adaptive_revision(
         exclude_rejected_arguments=exclude_rejected_arguments,
     )
     return report, qbaf_graphs, final_arguments, normalized_evidence, evidence_graph
+
+
+def _rerun_from_claim_decomposition(
+    *,
+    bundle: CaseBundle,
+    legacy_case: MultimediaCase,
+    claims: list[SubClaim],
+    raw_evidence: list[EvidenceItem],
+    all_evidence: list[EvidenceItem],
+    memory_by_claim: dict[str, list[MemoryRecord]],
+    reviewed_arguments: list[Argument],
+    research_plans: dict[str, ResearchPlan],
+    revision_plan: RevisionPlan,
+    llm_client: LLMClient,
+    exclude_rejected_arguments: bool,
+) -> tuple[VerificationReport, list[QBAFGraph], list[Argument], list[EvidenceItem], EvidenceGraph]:
+    from src.main import _merge_dedup_evidence, _research_claims_parallel
+
+    new_claims = ClaimDecomposer(llm_client=llm_client).decompose(
+        case=legacy_case,
+        evidence=raw_evidence,
+    )
+    old_claims_by_id = {claim.claim_id: claim for claim in claims}
+    new_claim_ids = {claim.claim_id for claim in new_claims}
+
+    changed_or_new_claims = [
+        claim
+        for claim in new_claims
+        if claim.claim_id not in old_claims_by_id
+        or claim.statement != old_claims_by_id[claim.claim_id].statement
+    ]
+
+    memory_retriever = MemoryRetriever()
+    new_memory_by_claim = dict(memory_by_claim)
+    for claim in changed_or_new_claims:
+        if claim.claim_id in new_memory_by_claim:
+            continue
+        new_memory_by_claim[claim.claim_id] = (
+            memory_retriever.retrieve(case=legacy_case, claim=claim, evidence=raw_evidence, top_k=5)
+            if bundle.run_config.allow_memory_retrieval
+            else []
+        )
+
+    new_evidence: list[EvidenceItem] = []
+    if bundle.run_config.allow_web_search or bundle.run_config.allow_reverse_search:
+        researcher = DeepResearcher(llm_client=llm_client)
+        safe_research_plans = _ensure_research_plans(research_plans, changed_or_new_claims, legacy_case, llm_client)
+        for claim in changed_or_new_claims:
+            claim_new_evidence = _research_claims_parallel(
+                researcher=researcher,
+                claims=[claim],
+                research_plans=safe_research_plans,
+                existing_evidence=all_evidence,
+            )
+            new_evidence.extend(
+                _tag_evidence_for_retrieval_rerun(claim_new_evidence, claim.claim_id, revision_plan)
+            )
+
+    merged_evidence = _merge_dedup_evidence(all_evidence, new_evidence)
+    re_normalized_evidence = EvidenceNormalizer().normalize(merged_evidence)
+    re_evidence_graph = EvidenceGraphBuilder().build(re_normalized_evidence, new_claims)
+
+    logger.info("Regenerating arguments for %d new/changed subclaim(s)", len(changed_or_new_claims))
+    regenerated = rerun_argument_stage_for_claims(
+        affected_claims=changed_or_new_claims,
+        normalized_evidence=re_normalized_evidence,
+        evidence_graph=re_evidence_graph,
+        memory_by_claim=new_memory_by_claim,
+        bundle=bundle,
+        llm_client=llm_client,
+        exclude_rejected_arguments=exclude_rejected_arguments,
+        revision_plan=revision_plan,
+    )
+
+    changed_or_new_claim_ids = {claim.claim_id for claim in changed_or_new_claims}
+    retained_arguments = [
+        argument
+        for argument in reviewed_arguments
+        if argument.claim_id in new_claim_ids and argument.claim_id not in changed_or_new_claim_ids
+    ]
+    merged_arguments = [*retained_arguments, *regenerated]
+
+    logger.info("Rerunning QBAF and final report over regenerated subclaims")
+    memory_used = _flatten_memory(new_memory_by_claim.values())
+    report, qbaf_graphs, final_arguments = _rerun_qbaf_and_report_all_claims(
+        legacy_case=legacy_case,
+        bundle=bundle,
+        claims=new_claims,
+        arguments=merged_arguments,
+        evidence=re_normalized_evidence,
+        evidence_graph=re_evidence_graph,
+        memory_used=memory_used,
+        llm_client=llm_client,
+        exclude_rejected_arguments=exclude_rejected_arguments,
+    )
+    return report, qbaf_graphs, final_arguments, re_normalized_evidence, re_evidence_graph
 
 
 def _ensure_research_plans(

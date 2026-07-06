@@ -48,6 +48,7 @@ from src.schemas.report_schema import SubClaimReport, VerificationReport
 from src.utils.env_loader import get_bool_env, get_int_env
 from src.utils.io import project_root, read_json, write_json
 from src.utils.llm_client import LLMClient, build_llm_client
+from src.utils.tool_config import load_tools_config
 
 
 logger = logging.getLogger("run_case")
@@ -68,16 +69,22 @@ def run_case_bundle(
     save_case_trace: bool = True,
     exclude_rejected_arguments: bool = True,
 ) -> VerificationReport:
-    del config_path
     if mode not in {"inference_only", "self_evolving", "test", "bootstrap_memory"}:
         raise ValueError("mode must be inference_only, self_evolving, test, or bootstrap_memory")
+
+    if (human_review_path is not None or human_review_batch is not None) and not bundle.run_config.allow_human_contestation:
+        raise ValueError(
+            "Human contestation review was provided, but "
+            "bundle.run_config.allow_human_contestation=false."
+        )
 
     assert_no_gold_leakage(bundle, mode)
     shared_llm_client = llm_client or build_llm_client()
     legacy_case = case_bundle_to_multimedia_case(bundle)
+    tools_config = load_tools_config(config_path)
 
     logger.info("[1/8] Raw media processing")
-    raw_evidence = RawMediaProcessor(llm_client=shared_llm_client).process(legacy_case, case_path=case_path)
+    raw_evidence = RawMediaProcessor(llm_client=shared_llm_client, config=tools_config).process(legacy_case, case_path=case_path)
     raw_evidence.extend(legacy_case.provided_evidence)
 
     logger.info("[3/8] Claim decomposition")
@@ -372,6 +379,12 @@ def run_from_step(
     case_path: Path | None = None,
     exclude_rejected_arguments: bool = True,
 ) -> VerificationReport:
+    if human_review_batch is not None and not bundle.run_config.allow_human_contestation:
+        raise ValueError(
+            "Human contestation review was provided, but "
+            "bundle.run_config.allow_human_contestation=false."
+        )
+
     if previous_state is None or not previous_state.arguments:
         return run_case_bundle(
             bundle=bundle,
