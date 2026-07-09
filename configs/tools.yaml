@@ -28,6 +28,16 @@ retrieval:
   gdelt_max_retries: 3
   gdelt_backoff_base_sec: 20
   gdelt_circuit_breaker_cooldown_sec: 300
+  yandex_reverse_enabled: false
+  yandex_reverse_base_url: "https://searchapi.api.cloud.yandex.net/v2/image/search_by_image"
+  yandex_reverse_max_images_per_claim: 3
+  yandex_reverse_max_results_per_image: 10
+  yandex_reverse_timeout_sec: 20
+  yandex_reverse_min_interval_sec: 3
+  yandex_reverse_max_retries: 2
+  yandex_reverse_family_mode: "FAMILY_MODE_MODERATE"
+  yandex_reverse_cache_enabled: true
+  yandex_reverse_cache_path: "data/cache/yandex_reverse_cache.json"
 
 media:
   enable_ffmpeg_keyframes: true

@@ -13,6 +13,7 @@ from src.retrieval.geolocation_search import GeolocationSearch
 from src.retrieval.news_search import NewsSearch
 from src.retrieval.reverse_search import ReverseSearch
 from src.retrieval.web_search import CachedEvidenceSearch
+from src.retrieval.yandex_reverse_image_search import YandexReverseImageSearch
 from src.schemas.claim_schema import ResearchPlan, SubClaim
 from src.schemas.evidence_schema import EvidenceItem, Provenance
 from src.utils.hashing import stable_hash_text
@@ -43,6 +44,11 @@ class DeepResearcher:
         self.free_web_search = FreeWebSearch()
         self.gdelt_search = GDELTSearch()
         logger.info("GDELT search enabled=%s", self.gdelt_search.config.get("gdelt_search_enabled", False))
+        self.yandex_reverse_search = YandexReverseImageSearch()
+        logger.info(
+            "Yandex reverse image search enabled=%s",
+            self.yandex_reverse_search.config.get("yandex_reverse_enabled", False),
+        )
         self.adapters = [
             cached,
             ReverseSearch(cached),
@@ -76,6 +82,13 @@ class DeepResearcher:
             found[item.evidence_id] = item
 
         query_images = _query_image_paths(existing_evidence)
+        for item in self.yandex_reverse_search.search(
+            claim=claim,
+            plan=enriched_plan,
+            query_image_paths=query_images,
+        ):
+            found[item.evidence_id] = item
+
         for item in self.free_web_search.search(
             claim,
             enriched_plan,

@@ -398,6 +398,41 @@ SEMV_GDELT_TIMESPAN=1month \
 python scripts/run_case.py ...
 ```
 
+### Yandex online reverse image search
+
+SEMV can use the official Yandex Search API for online reverse image search.
+
+Required environment variables:
+
+```bash
+SEMV_ENABLE_YANDEX_REVERSE=true
+SEMV_YANDEX_API_KEY=your_yandex_api_key
+SEMV_YANDEX_FOLDER_ID=your_yandex_folder_id
+```
+
+Alternative authentication:
+
+```bash
+SEMV_YANDEX_IAM_TOKEN=your_yandex_iam_token
+```
+
+Example:
+
+```bash
+SEMV_ENABLE_YANDEX_REVERSE=true \
+SEMV_YANDEX_API_KEY=... \
+SEMV_YANDEX_FOLDER_ID=... \
+SEMV_ENABLE_LOCAL_REVERSE=true \
+python scripts/run_case.py \
+  --case-path data/raw/mv2026/training/ID333/ID333 \
+  --adapter mv2026_folder \
+  --split training \
+  --mode inference_only
+```
+
+Yandex results are emitted as `reverse_image_web_candidate` evidence with
+provenance method `yandex_search_api_search_by_image`.
+
 ## Deep Forensics / TruFor Setup
 
 `ForensicAnalyzer` supports two forensic engines, selected by `forensic_engine`

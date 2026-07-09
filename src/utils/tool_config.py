@@ -38,6 +38,16 @@ _DEFAULT_TOOLS_CONFIG: dict[str, Any] = {
         "gdelt_max_retries": 3,
         "gdelt_backoff_base_sec": 20,
         "gdelt_circuit_breaker_cooldown_sec": 300,
+        "yandex_reverse_enabled": False,
+        "yandex_reverse_base_url": "https://searchapi.api.cloud.yandex.net/v2/image/search_by_image",
+        "yandex_reverse_max_images_per_claim": 3,
+        "yandex_reverse_max_results_per_image": 10,
+        "yandex_reverse_timeout_sec": 20,
+        "yandex_reverse_min_interval_sec": 3,
+        "yandex_reverse_max_retries": 2,
+        "yandex_reverse_family_mode": "FAMILY_MODE_MODERATE",
+        "yandex_reverse_cache_enabled": True,
+        "yandex_reverse_cache_path": "data/cache/yandex_reverse_cache.json",
     },
     "media": {
         "enable_ffmpeg_keyframes": True,
@@ -113,6 +123,25 @@ def load_tools_config(config_path: str = "configs/tools.yaml") -> dict[str, Any]
     _env_int(retrieval, "gdelt_min_interval_sec", "SEMV_GDELT_MIN_INTERVAL_SEC")
     _env_int(retrieval, "gdelt_max_retries", "SEMV_GDELT_MAX_RETRIES")
     _env_int(retrieval, "gdelt_backoff_base_sec", "SEMV_GDELT_BACKOFF_BASE_SEC")
+    _env_bool(retrieval, "yandex_reverse_enabled", "SEMV_ENABLE_YANDEX_REVERSE")
+    _env_int(
+        retrieval,
+        "yandex_reverse_max_images_per_claim",
+        "SEMV_YANDEX_REVERSE_MAX_IMAGES_PER_CLAIM",
+    )
+    _env_int(
+        retrieval,
+        "yandex_reverse_max_results_per_image",
+        "SEMV_YANDEX_REVERSE_MAX_RESULTS_PER_IMAGE",
+    )
+    _env_int(retrieval, "yandex_reverse_timeout_sec", "SEMV_YANDEX_REVERSE_TIMEOUT_SEC")
+    _env_int(
+        retrieval,
+        "yandex_reverse_min_interval_sec",
+        "SEMV_YANDEX_REVERSE_MIN_INTERVAL_SEC",
+    )
+    _env_int(retrieval, "yandex_reverse_max_retries", "SEMV_YANDEX_REVERSE_MAX_RETRIES")
+    _env_str(retrieval, "yandex_reverse_family_mode", "SEMV_YANDEX_REVERSE_FAMILY_MODE")
     return config
 
 
