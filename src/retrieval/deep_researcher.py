@@ -63,6 +63,7 @@ class DeepResearcher:
         claim: SubClaim,
         plan: ResearchPlan,
         existing_evidence: list[EvidenceItem],
+        allow_reverse_search: bool = True,
     ) -> list[EvidenceItem]:
         found: dict[str, EvidenceItem] = {}
         for item in self._relevant_existing_evidence(claim, existing_evidence):
@@ -82,12 +83,13 @@ class DeepResearcher:
             found[item.evidence_id] = item
 
         query_images = _query_image_paths(existing_evidence)
-        for item in self.yandex_reverse_search.search(
-            claim=claim,
-            plan=enriched_plan,
-            query_image_paths=query_images,
-        ):
-            found[item.evidence_id] = item
+        if allow_reverse_search:
+            for item in self.yandex_reverse_search.search(
+                claim=claim,
+                plan=enriched_plan,
+                query_image_paths=query_images,
+            ):
+                found[item.evidence_id] = item
 
         for item in self.free_web_search.search(
             claim,

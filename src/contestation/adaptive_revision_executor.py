@@ -468,6 +468,7 @@ def execute_adaptive_revision(
                 claims=[claim],
                 research_plans=safe_research_plans,
                 existing_evidence=all_evidence,
+                allow_reverse_search=bundle.run_config.allow_reverse_search,
             )
             new_evidence.extend(
                 _tag_evidence_for_retrieval_rerun(claim_new_evidence, claim.claim_id, revision_plan)
@@ -586,6 +587,7 @@ def _rerun_from_claim_decomposition(
                 claims=[claim],
                 research_plans=safe_research_plans,
                 existing_evidence=all_evidence,
+                allow_reverse_search=bundle.run_config.allow_reverse_search,
             )
             new_evidence.extend(
                 _tag_evidence_for_retrieval_rerun(claim_new_evidence, claim.claim_id, revision_plan)

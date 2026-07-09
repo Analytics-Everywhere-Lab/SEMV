@@ -134,6 +134,7 @@ def run_case_bundle(
             claims=claims,
             research_plans=research_plans,
             existing_evidence=existing_evidence_snapshot,
+            allow_reverse_search=bundle.run_config.allow_reverse_search,
         )
         all_evidence = _merge_dedup_evidence(all_evidence, research_results)
 
@@ -835,6 +836,7 @@ def _research_claims_parallel(
     claims: list[SubClaim],
     research_plans: dict[str, ResearchPlan],
     existing_evidence: list[EvidenceItem],
+    allow_reverse_search: bool = True,
 ) -> list[EvidenceItem]:
     max_workers = _max_parallel_research_workers(len(claims))
     if max_workers <= 1:
@@ -845,6 +847,7 @@ def _research_claims_parallel(
                     claim=claim,
                     plan=research_plans[claim.claim_id],
                     existing_evidence=existing_evidence,
+                    allow_reverse_search=allow_reverse_search,
                 )
             )
         return results
@@ -857,6 +860,7 @@ def _research_claims_parallel(
                 claim=claim,
                 plan=research_plans[claim.claim_id],
                 existing_evidence=existing_evidence,
+                allow_reverse_search=allow_reverse_search,
             ): claim
             for claim in claims
         }

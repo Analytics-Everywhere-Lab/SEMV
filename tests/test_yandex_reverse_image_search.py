@@ -149,3 +149,33 @@ def test_deep_researcher_calls_yandex_before_free_web(tmp_path):
     result_ids = {item.evidence_id for item in result}
     assert "yandex_1" in result_ids
     assert "ddg_1" in result_ids
+
+
+def test_deep_researcher_skips_yandex_when_reverse_search_disallowed(monkeypatch, tmp_path):
+    monkeypatch.setenv("SEMV_ENABLE_YANDEX_REVERSE", "true")
+    llm_client = MagicMock()
+    researcher = DeepResearcher(llm_client)
+    query_path = _image(tmp_path / "query.jpg")
+    existing = [
+        EvidenceItem(
+            evidence_id="frame_1",
+            source_type="frame_analysis",
+            content="frame",
+            source="case",
+            media_path=str(query_path),
+            supports_claim_types=["what"],
+        )
+    ]
+    researcher.yandex_reverse_search.search = MagicMock(side_effect=AssertionError("Yandex must not run"))
+    researcher.free_web_search.search = MagicMock(return_value=[])
+    researcher.gdelt_search.search = MagicMock(return_value=[])
+    researcher.adapters = []
+
+    researcher.research(
+        _claim(),
+        ResearchPlan(claim_id="c1"),
+        existing_evidence=existing,
+        allow_reverse_search=False,
+    )
+
+    researcher.yandex_reverse_search.search.assert_not_called()

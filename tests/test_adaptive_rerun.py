@@ -192,7 +192,7 @@ def _two_claim_trace() -> CaseTrace:
 
 
 def test_qbaf_only_contestation_does_not_call_retrieval(monkeypatch):
-    def _raise_if_called(self, claim, plan, existing_evidence):
+    def _raise_if_called(self, claim, plan, existing_evidence, allow_reverse_search=True):
         raise AssertionError("DeepResearcher.research must not be called for a qbaf-only contestation")
 
     monkeypatch.setattr(DeepResearcher, "research", _raise_if_called)
@@ -218,7 +218,7 @@ def test_qbaf_only_contestation_does_not_call_retrieval(monkeypatch):
 
 
 def test_unsupported_evidence_reruns_validation_not_retrieval(monkeypatch):
-    def _raise_if_called(self, claim, plan, existing_evidence):
+    def _raise_if_called(self, claim, plan, existing_evidence, allow_reverse_search=True):
         raise AssertionError("DeepResearcher.research must not be called for evidence_validation")
 
     monkeypatch.setattr(DeepResearcher, "research", _raise_if_called)
@@ -247,7 +247,7 @@ def test_unsupported_evidence_reruns_validation_not_retrieval(monkeypatch):
 def test_wrong_source_reruns_retrieval_only_for_affected_claim(monkeypatch):
     calls: list[str] = []
 
-    def _tracking_research(self, claim, plan, existing_evidence):
+    def _tracking_research(self, claim, plan, existing_evidence, allow_reverse_search=True):
         calls.append(claim.claim_id)
         return [EvidenceItem(evidence_id="ev_new", content="freshly retrieved", reliability=0.8, relevance=0.8)]
 
@@ -281,7 +281,7 @@ def test_wrong_source_reruns_retrieval_only_for_affected_claim(monkeypatch):
 
 
 def test_selective_rerun_leaves_unaffected_claim_untouched(monkeypatch):
-    def _no_research(self, claim, plan, existing_evidence):
+    def _no_research(self, claim, plan, existing_evidence, allow_reverse_search=True):
         return []
 
     monkeypatch.setattr(DeepResearcher, "research", _no_research)
@@ -342,7 +342,7 @@ def test_human_added_argument_is_verified_and_scored():
 
 
 def test_human_edited_argument_is_verified_and_rescored(monkeypatch):
-    def _no_research(self, claim, plan, existing_evidence):
+    def _no_research(self, claim, plan, existing_evidence, allow_reverse_search=True):
         return []
 
     monkeypatch.setattr(DeepResearcher, "research", _no_research)
