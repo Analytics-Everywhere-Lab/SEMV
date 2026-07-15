@@ -80,7 +80,7 @@ class ArgumentGenerator:
     ) -> list[Argument]:
         del evidence_graph
         memory_lines = [f"[{item.memory_id}] {item.text}" for item in memory_items[:3]]
-        valid_memory_ids = {item.memory_id for item in memory_items}
+        valid_memory_ids = {item.memory_id for item in memory_items[:3]}
         prompt = (
             "Generate concise support and attack arguments for this verification "
             "sub-claim. Return JSON as "
@@ -109,6 +109,9 @@ class ArgumentGenerator:
                         if memory_id in valid_memory_ids
                     }
                 )
+                if used_memory_ids and not item.get("evidence_ids"):
+                    evidence_ids = []
+                    flags = sorted(set(flags + ["missing_argument_evidence"]))
                 argument = self._build_argument(
                     claim=claim,
                     stance=stance,

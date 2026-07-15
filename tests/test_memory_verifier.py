@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from src.memory.memory_consolidator import MemoryConsolidator
 from src.memory.memory_store import MemoryStore
 from src.memory.memory_verifier import MemoryVerifier
 
@@ -128,7 +129,7 @@ def test_equivalent_candidate_from_new_case_is_not_rejected_as_duplicate(tmp_pat
     assert result.verification_status == "verified"
 
 
-def test_contradicting_stronger_memory_is_rejected(tmp_path):
+def test_verified_contradiction_reaches_conflict_count(tmp_path):
     from tests.memory_test_utils import MemoryFakeLLM
 
     verifier, store = _verifier(tmp_path, MemoryFakeLLM())
@@ -149,5 +150,11 @@ def test_contradicting_stronger_memory_is_rejected(tmp_path):
 
     result = verifier.verify(candidate)
 
-    assert result.verified is False
-    assert result.rejected_reason.startswith("contradicts_active_memory")
+    assert result.verified is True
+    assert result.semantic_relation == "contradicts"
+    assert result.related_memory_id == "mem_existing"
+    consolidator = MemoryConsolidator(store=store, config=verifier.config, similarity=verifier.similarity)
+    consolidator.apply([result])
+    consolidation = consolidator.consolidate()
+    assert store.load_long_term()[0].conflict_count == 1
+    assert consolidation.conflicted

@@ -32,6 +32,7 @@ def evaluate_mv2026(
     limit: int | None = None,
     memory_service=None,
     update_memory: bool = False,
+    allow_memory_retrieval: bool = True,
 ) -> dict:
     root = _resolve(raw_root)
     if not root.exists():
@@ -64,10 +65,17 @@ def evaluate_mv2026(
         bundle = bundle.model_copy(
             update={
                 "run_config": bundle.run_config.model_copy(
-                    update={"allow_memory_update": update_memory}
+                    update={"allow_memory_update": update_memory, "allow_memory_retrieval": allow_memory_retrieval}
                 )
             }
         )
+        parsed_gold: dict[str, GoldRecord] = {}
+
+        def provide_post_prediction_gold() -> str | None:
+            gold_record = _gold_from_bundle(bundle)
+            parsed_gold["record"] = gold_record
+            return normalize_mv2026_label(gold_record.gold_final_label or gold_record.gold_status_text)
+
         # Prequential/bootstrap: predict first with memory from previous cases,
         # then reveal gold and stage reflection. Evaluation-only runs never update.
         mode = "bootstrap_memory" if update_memory else "inference_only"
@@ -77,11 +85,12 @@ def evaluate_mv2026(
             llm_client=llm_client,
             case_path=case_dir,
             memory_service=memory_service,
+            post_prediction_supervision_provider=(provide_post_prediction_gold if update_memory else None),
         )
         prediction = prediction_from_report(report, "mv2026", "multimedia_verification")
         predictions.append(prediction.model_dump(mode="json"))
 
-        gold = _gold_from_bundle(bundle)
+        gold = parsed_gold.get("record") or _gold_from_bundle(bundle)
         gold_records.append(gold.model_dump(mode="json"))
         gold_label = normalize_mv2026_label(gold.gold_final_label or gold.gold_status_text)
         pred_label = normalize_mv2026_label(report.final_status)

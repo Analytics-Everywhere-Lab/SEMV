@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from src.evaluation.label_normalizer import normalize_mv2026_label
 from src.memory.memory_service import MemoryService
 from src.reflection.failure_classifier import FailureClassifier
 from src.reflection.lesson_generator import LessonGenerator
@@ -31,20 +32,21 @@ class ReflectionAgent:
         human_feedback: dict | None = None,
         update_memory: bool = False,
     ) -> tuple[ReflectionLog, list[MemoryUpdateCandidate]]:
+        normalized_gold = normalize_mv2026_label(ground_truth_label) if ground_truth_label else None
+        normalized_predicted = normalize_mv2026_label(report.final_status)
+        reflection_report = report.model_copy(update={"final_status": normalized_predicted})
         failure_modes = self.failure_classifier.classify(
-            report,
-            ground_truth_label,
-            human_feedback,
+            reflection_report, normalized_gold, human_feedback
         )
         reflection = ReflectionLog(
             case_id=report.case_id,
-            predicted_label=report.final_status,
-            ground_truth_label=ground_truth_label,
+            predicted_label=normalized_predicted,
+            ground_truth_label=normalized_gold,
             human_feedback=human_feedback or {},
             failure_modes=failure_modes,
             lessons=[],
         )
-        candidates = self.lesson_generator.generate(report, reflection)
+        candidates = self.lesson_generator.generate(reflection_report, reflection)
         valid_evidence_ids = {item.evidence_id for item in report.evidence}
         valid_argument_ids = {
             argument.argument_id

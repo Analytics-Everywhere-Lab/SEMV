@@ -42,7 +42,14 @@ class MemoryService:
         usage_log_path: str | Path | None = None,
     ) -> None:
         self.config = config or (store.config if store is not None else load_memory_config())
-        self.store = store or MemoryStore(config=self.config)
+        if store is None and frozen:
+            configured_dir = self.config.paths.resolved_memory_dir()
+            if (configured_dir / "manifest.json").exists():
+                store = MemoryStore(configured_dir, read_only=True)
+                self.config = store.config
+        self.store = store or MemoryStore(config=self.config, read_only=frozen)
+        if frozen:
+            self.store.read_only = True
         self.llm_client = llm_client
         self.frozen = frozen
         self.usage_log_path = Path(usage_log_path) if usage_log_path else None
@@ -73,6 +80,9 @@ class MemoryService:
         config = load_memory_config(config_path, override_path=override_path)
         if memory_dir is not None:
             config = config.with_memory_dir(memory_dir)
+        if frozen and memory_dir is not None and (Path(memory_dir) / "manifest.json").exists():
+            store = MemoryStore(Path(memory_dir), read_only=True)
+            return cls(config=store.config, store=store, llm_client=llm_client, frozen=True, usage_log_path=usage_log_path)
         return cls(config=config, llm_client=llm_client, frozen=frozen, usage_log_path=usage_log_path)
 
     def verifier(self, llm_client: LLMClient | None = None) -> MemoryVerifier:
@@ -178,9 +188,13 @@ class MemoryService:
         outcome: str = "unknown",
         dataset_name: str | None = None,
         dataset_split: str | None = None,
+        run_id: str | None = None,
+        protocol_phase: str | None = None,
     ) -> MemoryUsageEvent:
         event = MemoryUsageEvent(
-            event_id=f"use_{stable_hash_text(case_id + memory_id + stage + (claim_id or '') + (argument_id or ''))}",
+            event_id=f"use_{stable_hash_text((run_id or case_id) + case_id + memory_id + stage + (claim_id or chr(0)) + (argument_id or chr(0)) + outcome)}",
+            run_id=run_id or case_id,
+            protocol_phase=protocol_phase or ("frozen_eval" if self.frozen else "training"),
             case_id=case_id,
             memory_id=memory_id,
             stage=stage,  # type: ignore[arg-type]

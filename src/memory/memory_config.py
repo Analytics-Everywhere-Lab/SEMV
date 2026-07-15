@@ -55,19 +55,20 @@ class SimilarityConfig(BaseModel):
 class PromotionThresholds(BaseModel):
     min_confidence: float = 0.75
     min_distinct_cases: int = 1
+    min_distinct_sources: int = 1
 
 
 class ConsolidationConfig(BaseModel):
     every_n_cases: int = 25
     min_distinct_sources: int = 2
     episodic: PromotionThresholds = Field(
-        default_factory=lambda: PromotionThresholds(min_confidence=0.85, min_distinct_cases=1)
+        default_factory=lambda: PromotionThresholds(min_confidence=0.85, min_distinct_cases=1, min_distinct_sources=1)
     )
     failure: PromotionThresholds = Field(
-        default_factory=lambda: PromotionThresholds(min_confidence=0.70, min_distinct_cases=2)
+        default_factory=lambda: PromotionThresholds(min_confidence=0.70, min_distinct_cases=2, min_distinct_sources=2)
     )
     semantic_rule: PromotionThresholds = Field(
-        default_factory=lambda: PromotionThresholds(min_confidence=0.75, min_distinct_cases=3)
+        default_factory=lambda: PromotionThresholds(min_confidence=0.75, min_distinct_cases=3, min_distinct_sources=3)
     )
     max_conflict_ratio: float = 0.20
     under_review_conflict_ratio: float = 0.30
@@ -84,7 +85,9 @@ class ConsolidationConfig(BaseModel):
 
 class RetrievalConfig(BaseModel):
     top_k: int = 5
-    min_similarity: float = 0.05
+    min_similarity: float | None = 0.05
+    min_semantic_similarity: float = 0.05
+    min_final_score: float = 0.05
     include_memory_types: list[str] = Field(
         default_factory=lambda: ["episodic", "failure", "semantic_rule"]
     )
@@ -145,7 +148,13 @@ def load_memory_config(
         data = _deep_merge(data, override_data)
     if overrides:
         data = _deep_merge(data, overrides)
-    # Legacy flat key from the old configs/memory.yaml.
+    retrieval = data.get("retrieval")
+    if isinstance(retrieval, dict) and retrieval.get("min_similarity") is not None:
+        retrieval = dict(retrieval)
+        retrieval.setdefault("min_final_score", retrieval["min_similarity"])
+        retrieval.setdefault("min_semantic_similarity", retrieval["min_similarity"])
+        data["retrieval"] = retrieval
+        # Legacy flat key from the old configs/memory.yaml.
     consolidation = data.get("consolidation")
     if isinstance(consolidation, dict) and "duplicate_similarity" in consolidation:
         similarity = dict(data.get("similarity") or {})

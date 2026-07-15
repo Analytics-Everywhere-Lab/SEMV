@@ -113,3 +113,54 @@ def test_memory_only_arguments_are_rejected_as_ungrounded():
     verified = ArgumentVerifier(FakeLLMClient()).verify(claim, ungrounded, evidence)
     assert verified.verifier_valid is False
     assert "argument_without_evidence" in verified.uncertainty_flags
+
+
+def test_usage_rollup_updates_usage_fields_exactly_once(tmp_path):
+    service = make_service(tmp_path)
+    service.store.append(make_record(memory_id="mem_used"))
+    for _ in range(2):
+        service.log_usage(
+            case_id="train_case",
+            memory_id="mem_used",
+            stage="argument_cited",
+            claim_id="claim1",
+            argument_id="arg1",
+            outcome="successful",
+            dataset_name="mv2026",
+            dataset_split="train",
+            run_id="run1",
+            protocol_phase="training",
+        )
+    service.consolidate()
+    first = service.store.load_long_term()[0]
+    service.consolidate()
+    second = service.store.load_long_term()[0]
+    assert first.usage_count == 1
+    assert first.successful_usage_count == 1
+    assert first.contested_usage_count == 0
+    assert first.last_used_at
+    assert second.usage_count == 1
+    assert second.version == first.version
+
+
+def test_frozen_usage_telemetry_does_not_update_ltm(tmp_path):
+    train = make_service(tmp_path / "train")
+    train.store.append(make_record(memory_id="mem_used"))
+    snapshot = train.snapshot("frozen")
+    frozen = type(train)(
+        config=train.config.with_memory_dir(snapshot),
+        frozen=True,
+        usage_log_path=tmp_path / "eval" / "usage.jsonl",
+    )
+    before = frozen.state_hash(include_short_term=True)
+    frozen.log_usage(
+        case_id="test_case",
+        memory_id="mem_used",
+        stage="argument_cited",
+        argument_id="arg1",
+        outcome="successful",
+        dataset_name="mv2026",
+        dataset_split="test",
+    )
+    assert frozen.state_hash(include_short_term=True) == before
+    assert frozen.store.load_long_term()[0].usage_count == 0

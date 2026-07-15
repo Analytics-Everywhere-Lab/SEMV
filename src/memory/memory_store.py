@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +26,10 @@ except ImportError:  # pragma: no cover - non-posix fallback
     fcntl = None  # type: ignore[assignment]
 
 
+class MemoryReadOnlyError(RuntimeError):
+    """Raised when a frozen/read-only memory store is asked to mutate state."""
+
+
 class MemoryStore:
     """JSONL-backed memory store with STM/LTM lifecycles, event logs, archiving,
     snapshots, atomic rewrites, and a filesystem lock."""
@@ -38,22 +44,34 @@ class MemoryStore:
         self,
         memory_dir: Path | None = None,
         config: MemoryConfig | None = None,
+        read_only: bool | None = None,
     ) -> None:
+        requested_dir = Path(memory_dir) if memory_dir is not None else None
+        manifest_path = requested_dir / "manifest.json" if requested_dir is not None else None
+        if config is None and manifest_path is not None and manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            config = MemoryConfig.model_validate(manifest.get("memory_config") or {})
         self.config = config or MemoryConfig()
         if memory_dir is not None:
             self.config = self.config.with_memory_dir(memory_dir)
+        self.read_only = bool(read_only) if read_only is not None else bool(
+            requested_dir is not None and (requested_dir / "manifest.json").exists()
+        )
+        self._lock_state = threading.local()
         self.memory_dir = self.config.paths.resolved_memory_dir()
         if not self.memory_dir.is_absolute():
             self.memory_dir = project_root() / self.memory_dir
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        if not self.read_only:
+            self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.FILES = {
             "episodic": self.config.paths.episodic_file,
             "failure": self.config.paths.failure_file,
             "semantic_rule": self.config.paths.semantic_file,
         }
-        for filename in self.FILES.values():
-            (self.memory_dir / filename).touch(exist_ok=True)
-        (self.memory_dir / self.config.paths.short_term_file).touch(exist_ok=True)
+        if not self.read_only:
+            for filename in self.FILES.values():
+                (self.memory_dir / filename).touch(exist_ok=True)
+            (self.memory_dir / self.config.paths.short_term_file).touch(exist_ok=True)
 
     # ------------------------------------------------------------------ paths
 
@@ -88,23 +106,45 @@ class MemoryStore:
 
     # ------------------------------------------------------------------- lock
 
+    def _ensure_writable(self) -> None:
+        if self.read_only:
+            raise MemoryReadOnlyError(f"Memory store is read-only: {self.memory_dir}")
+
     @contextmanager
-    def _lock(self):
-        """Filesystem lock so two processes cannot corrupt the JSONL files."""
-        lock_path = self.memory_dir / ".memory.lock"
-        handle = open(lock_path, "a+", encoding="utf-8")
+    def transaction(self):
+        """Re-entrant process-safe transaction for a full read/modify/write cycle."""
+        if self.read_only:
+            yield self
+            return
+        depth = getattr(self._lock_state, "depth", 0)
+        if depth:
+            self._lock_state.depth = depth + 1
+            try:
+                yield self
+            finally:
+                self._lock_state.depth -= 1
+            return
+        handle = open(self.memory_dir / ".memory.lock", "a+", encoding="utf-8")
+        self._lock_state.depth = 1
         try:
             if fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            yield
+            yield self
         finally:
             if fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
+            self._lock_state.depth = 0
+
+    @contextmanager
+    def _lock(self):
+        with self.transaction():
+            yield
 
     # ------------------------------------------------------------ atomic I/O
 
     def _atomic_write_jsonl(self, path: Path, rows: list) -> None:
+        self._ensure_writable()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         with tmp_path.open("w", encoding="utf-8") as handle:
@@ -114,6 +154,7 @@ class MemoryStore:
 
     def _backup(self, path: Path) -> Path | None:
         """Timestamped backup before rewriting an existing non-empty store."""
+        self._ensure_writable()
         if not path.exists() or path.stat().st_size == 0:
             return None
         backup_dir = self.archive_dir / "backups"
@@ -162,6 +203,7 @@ class MemoryStore:
 
     def append(self, record: MemoryRecord) -> None:
         """Backward-compatible direct append to a long-term store."""
+        self._ensure_writable()
         with self._lock():
             append_jsonl(self.long_term_path(record.memory_type), record)
 
@@ -170,11 +212,15 @@ class MemoryStore:
 
         Re-staging the same candidate (same case rerun) replaces the previous
         row instead of duplicating it."""
+        self._ensure_writable()
         with self._lock():
             existing = self.load_short_term()
             by_id = {row.stm_id: row for row in existing}
             previous = by_id.get(record.stm_id)
-            if previous is not None and previous.status in {"promoted", "merged"}:
+            if previous is not None and (
+                previous.status in {"promoted", "merged"}
+                or (previous.status == "under_review" and previous.promoted_to_memory_id)
+            ):
                 # Terminal STM states are preserved: a rerun must not resurrect
                 # an already-consolidated observation.
                 return previous
@@ -192,6 +238,7 @@ class MemoryStore:
         return record
 
     def upsert_short_term(self, records: list[ShortTermMemoryRecord]) -> None:
+        self._ensure_writable()
         with self._lock():
             by_id = {row.stm_id: row for row in self.load_short_term()}
             for record in records:
@@ -199,6 +246,7 @@ class MemoryStore:
             self._atomic_write_jsonl(self.short_term_path, list(by_id.values()))
 
     def replace_short_term(self, records: list[ShortTermMemoryRecord]) -> None:
+        self._ensure_writable()
         with self._lock():
             self._backup(self.short_term_path)
             self._atomic_write_jsonl(self.short_term_path, records)
@@ -206,6 +254,7 @@ class MemoryStore:
     def upsert_long_term(self, records: list[MemoryRecord]) -> None:
         """Update or insert long-term records, preserving memory IDs, with a
         timestamped backup and an atomic rewrite per affected file."""
+        self._ensure_writable()
         if not records:
             return
         with self._lock():
@@ -233,7 +282,10 @@ class MemoryStore:
     # ----------------------------------------------------------------- events
 
     def append_consolidation_event(self, event: ConsolidationEvent) -> None:
+        self._ensure_writable()
         with self._lock():
+            if event.event_id in {row.event_id for row in self.load_consolidation_events()}:
+                return
             append_jsonl(self.event_log_path, event)
 
     def append_usage_event(
@@ -241,8 +293,32 @@ class MemoryStore:
         event: MemoryUsageEvent,
         path_override: Path | None = None,
     ) -> None:
+        if self.read_only and path_override is None:
+            self._ensure_writable()
         target = path_override or self.usage_log_path
-        append_jsonl(target, event)
+        if self.read_only and path_override is not None:
+            target_abs = target.resolve()
+            memory_abs = self.memory_dir.resolve()
+            if target_abs == memory_abs or memory_abs in target_abs.parents:
+                self._ensure_writable()
+        if self.read_only:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            lock_handle = open(target.with_suffix(target.suffix + ".lock"), "a+", encoding="utf-8")
+            try:
+                if fcntl is not None:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                existing = {row.get("event_id") for row in read_jsonl(target)}
+                if event.event_id not in existing:
+                    append_jsonl(target, event)
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                lock_handle.close()
+            return
+        with self._lock():
+            existing = {row.get("event_id") for row in read_jsonl(target)}
+            if event.event_id not in existing:
+                append_jsonl(target, event)
 
     def load_usage_events(self) -> list[MemoryUsageEvent]:
         return [MemoryUsageEvent.model_validate(row) for row in read_jsonl(self.usage_log_path)]
@@ -255,6 +331,7 @@ class MemoryStore:
     def archive_records(self, records: list, name: str) -> Path | None:
         """Append replaced/expired/deprecated records to an archive file so they
         are never silently deleted."""
+        self._ensure_writable()
         if not records:
             return None
         self.archive_dir.mkdir(parents=True, exist_ok=True)
@@ -263,43 +340,78 @@ class MemoryStore:
             append_jsonl(target, record)
         return target
 
-    def snapshot(self, label: str | None = None) -> Path:
-        """Copy the current memory state into a frozen snapshot directory with a
-        manifest containing counts and the state hash."""
-        stamp = label or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        target = self.snapshot_dir / stamp
-        target.mkdir(parents=True, exist_ok=True)
-        copied = []
-        filenames = list(self.FILES.values()) + [
+    def _state_filenames(self) -> list[str]:
+        return list(self.FILES.values()) + [
             self.config.paths.short_term_file,
             self.config.paths.event_log_file,
         ]
-        for filename in filenames:
-            source = self.memory_dir / filename
-            if source.exists():
-                shutil.copy2(source, target / filename)
-                copied.append(filename)
-        manifest = {
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "source_memory_dir": str(self.memory_dir),
-            "files": copied,
-            "state_hash": self.state_hash(),
-            "counts": self.counts(),
-        }
-        (target / "manifest.json").write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-        return target
 
-    def state_hash(self, include_short_term: bool = False) -> str:
-        """Deterministic hash of the long-term (and optionally short-term) state."""
-        parts: list[str] = []
-        for record in sorted(self.load_long_term(), key=lambda r: r.memory_id):
-            parts.append(json.dumps(record.model_dump(mode="json"), sort_keys=True))
-        if include_short_term:
-            for record in sorted(self.load_short_term(), key=lambda r: r.stm_id):
-                parts.append(json.dumps(record.model_dump(mode="json"), sort_keys=True))
-        return stable_hash_text("\n".join(parts), length=64)
+    @staticmethod
+    def _file_hash(path: Path) -> str:
+        content = path.read_bytes() if path.exists() else b""
+        return hashlib.sha256(content).hexdigest()
+
+    def _state_config(self) -> dict:
+        data = self.config.model_dump(mode="json")
+        paths = data.get("paths", {})
+        for key in ("memory_dir", "archive_dir", "snapshot_dir", "usage_log_file"):
+            paths.pop(key, None)
+        return data
+
+    def _state_payload(self) -> dict:
+        records = self.load_long_term()
+        seed_ids = sorted(record.memory_id for record in records if record.origin == "seed")
+        return {
+            "schema_version": 1,
+            "file_hashes": {
+                filename: self._file_hash(self.memory_dir / filename)
+                for filename in self._state_filenames()
+            },
+            "memory_config": self._state_config(),
+            "seed": {"version": 1, "memory_ids": seed_ids},
+        }
+
+    def snapshot(self, label: str | None = None) -> Path:
+        """Take one locked, deterministic full-state snapshot and manifest."""
+        self._ensure_writable()
+        with self.transaction():
+            stamp = label or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            target = self.snapshot_dir / stamp
+            if target.exists():
+                raise FileExistsError(f"Snapshot already exists: {target}")
+            target.mkdir(parents=True, exist_ok=False)
+            for filename in self._state_filenames():
+                source = self.memory_dir / filename
+                destination = target / filename
+                if source.exists():
+                    shutil.copy2(source, destination)
+                else:
+                    destination.write_bytes(b"")
+            payload = self._state_payload()
+            aggregate = stable_hash_text(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")), length=64
+            )
+            manifest = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "source_memory_dir": str(self.memory_dir),
+                "files": self._state_filenames(),
+                **payload,
+                "state_hash": aggregate,
+                "full_state_hash": aggregate,
+                "counts": self.counts(),
+            }
+            (target / "manifest.json").write_text(
+                json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            return target
+
+    def state_hash(self, include_short_term: bool = True) -> str:
+        """Deterministic complete state hash; external usage telemetry is excluded."""
+        del include_short_term
+        payload = self._state_payload()
+        return stable_hash_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")), length=64
+        )
 
     def counts(self) -> dict[str, int]:
         long_term = self.load_long_term()

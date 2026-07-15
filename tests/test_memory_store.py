@@ -122,3 +122,31 @@ def test_state_hash_changes_with_content(tmp_path):
     before = store.state_hash()
     store.append(make_record())
     assert store.state_hash() != before
+
+
+def test_read_only_store_rejects_direct_mutation_and_creates_nothing(tmp_path):
+    import pytest
+    from src.memory.memory_store import MemoryReadOnlyError
+
+    missing = tmp_path / "missing_snapshot"
+    store = MemoryStore(missing, read_only=True)
+    assert not missing.exists()
+    with pytest.raises(MemoryReadOnlyError):
+        store.append(make_record())
+    with pytest.raises(MemoryReadOnlyError):
+        store.stage_candidate(ShortTermMemoryRecord.from_candidate(make_candidate(verified=True)))
+    with pytest.raises(MemoryReadOnlyError):
+        store.snapshot("forbidden")
+    assert not missing.exists()
+
+
+def test_opening_snapshot_does_not_touch_source_files(tmp_path):
+    store = MemoryStore(config=make_memory_config(tmp_path))
+    store.append(make_record())
+    snapshot = store.snapshot("immutable")
+    before = {path.name: path.stat().st_mtime_ns for path in snapshot.iterdir() if path.is_file()}
+    opened = MemoryStore(snapshot)
+    assert opened.read_only is True
+    assert opened.state_hash() == store.state_hash()
+    after = {path.name: path.stat().st_mtime_ns for path in snapshot.iterdir() if path.is_file()}
+    assert after == before

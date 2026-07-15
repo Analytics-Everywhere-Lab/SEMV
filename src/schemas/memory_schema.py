@@ -22,7 +22,9 @@ LifecycleStatus = Literal[
     "expired",
 ]
 
-SemanticRelation = Literal["equivalent", "entails", "contradicts", "unrelated"]
+SemanticRelation = Literal[
+    "equivalent", "entails", "a_entails_b", "b_entails_a", "contradicts", "unrelated"
+]
 
 SupervisionSource = Literal["gold_label", "human_feedback", "self_reflection"]
 
@@ -93,8 +95,9 @@ class MemoryRecord(BaseModel):
 
     def independent_support(self) -> int:
         """Independent support = unique source fingerprints (falling back to case ids)."""
-        fingerprints = set(self.source_fingerprints) or set(self.source_case_ids)
-        return len(fingerprints) if fingerprints else self.support_count
+        fingerprints = set(self.source_fingerprints)
+        cases = set(self.source_case_ids)
+        return max(self.support_count, len(fingerprints), len(cases))
 
 
 class MemoryUpdateCandidate(BaseModel):
@@ -122,6 +125,8 @@ class MemoryUpdateCandidate(BaseModel):
     exceptions: list[str] = Field(default_factory=list)
     polarity: str | None = None
     source_fingerprint: str | None = None
+    semantic_relation: SemanticRelation | None = None
+    related_memory_id: str | None = None
     grounding_evidence_ids: list[str] = Field(default_factory=list)
     grounding_argument_ids: list[str] = Field(default_factory=list)
     supervision_source: SupervisionSource = "self_reflection"
@@ -181,6 +186,8 @@ class ShortTermMemoryRecord(BaseModel):
     exceptions: list[str] = Field(default_factory=list)
     polarity: str | None = None
     source_fingerprint: str | None = None
+    semantic_relation: SemanticRelation | None = None
+    related_memory_id: str | None = None
     grounding_evidence_ids: list[str] = Field(default_factory=list)
     grounding_argument_ids: list[str] = Field(default_factory=list)
     supervision_source: SupervisionSource = "self_reflection"
@@ -219,6 +226,8 @@ class ShortTermMemoryRecord(BaseModel):
             exceptions=list(candidate.exceptions),
             polarity=candidate.polarity,
             source_fingerprint=candidate.source_fingerprint,
+            semantic_relation=candidate.semantic_relation,
+            related_memory_id=candidate.related_memory_id,
             grounding_evidence_ids=list(candidate.grounding_evidence_ids),
             grounding_argument_ids=list(candidate.grounding_argument_ids),
             supervision_source=candidate.supervision_source,
@@ -235,6 +244,8 @@ class MemoryUsageEvent(BaseModel):
 
     event_id: str
     case_id: str
+    run_id: str | None = None
+    protocol_phase: str = "unknown"
     memory_id: str
     stage: Literal["retrieved", "planner_cited", "argument_cited"]
     claim_id: str | None = None
@@ -264,6 +275,8 @@ class ConsolidationEvent(BaseModel):
         "generalization_failed",
         "snapshot",
         "archived",
+        "candidate_verification",
+        "usage_rollup",
     ]
     memory_id: str | None = None
     stm_ids: list[str] = Field(default_factory=list)

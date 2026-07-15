@@ -41,3 +41,46 @@ def test_nested_mv2026_training_cases_are_discovered(tmp_path):
 
     assert _discover_case_dirs(tmp_path) == [direct_case, nested_case]
     assert _discover_case_dirs(nested_case) == [nested_case]
+
+
+def test_mv2026_gold_is_loaded_only_by_post_prediction_provider(tmp_path, monkeypatch):
+    import src.evaluation.mv2026_evaluator as evaluator
+    from src.schemas.report_schema import VerificationReport
+
+    case_dir = tmp_path / "ID900"
+    (case_dir / "input" / "media").mkdir(parents=True)
+    (case_dir / "output").mkdir()
+    (case_dir / "input" / "ID900.json").write_text(
+        json.dumps({"title": "A claim with no gold text in the input."}), encoding="utf-8"
+    )
+    sentinel = "out of context"
+    (case_dir / "output" / "report.md").write_text(
+        f"# Final Verification Status\nStatus: {sentinel}", encoding="utf-8"
+    )
+    observed = {}
+
+    def fake_run(bundle, **kwargs):
+        assert bundle.gold.gold_final_label is None
+        observed["provider_present"] = kwargs.get("post_prediction_supervision_provider") is not None
+        observed["gold_after_prediction"] = kwargs["post_prediction_supervision_provider"]()
+        return VerificationReport(case_id=bundle.case_id, final_status="false_context", final_confidence=0.9)
+
+    monkeypatch.setattr(evaluator, "run_case_bundle", fake_run)
+    result = evaluator.evaluate_mv2026(
+        raw_root=case_dir,
+        output_dir=tmp_path / "results",
+        split="train",
+        update_memory=True,
+    )
+    assert observed == {"provider_present": True, "gold_after_prediction": "false_context"}
+    assert result["accuracy"] == 1.0
+
+
+def test_normalized_label_aliases_do_not_create_false_failures():
+    from src.reflection.failure_classifier import FailureClassifier
+    from src.schemas.report_schema import VerificationReport
+
+    report = VerificationReport(case_id="case", final_status="false_context", final_confidence=0.9)
+    modes = FailureClassifier().classify(report, "Out of context", None)
+    assert "final_label_mismatch" not in modes
+    assert "successful_strategy" in modes

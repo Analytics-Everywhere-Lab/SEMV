@@ -9,7 +9,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.memory.memory_config import load_memory_config
 from src.memory.memory_service import MemoryService
+from src.memory.memory_store import MemoryStore
+from src.utils.llm_client import build_llm_client
 
 
 def main() -> None:
@@ -40,18 +43,32 @@ def main() -> None:
         action="store_true",
         help="After applying, write a frozen snapshot with manifest and state hash.",
     )
+    parser.add_argument(
+        "--use-llm",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use the configured vLLM client for relation checks and generalization.",
+    )
     args = parser.parse_args()
 
     if args.apply and args.dry_run:
         parser.error("--apply and --dry-run are mutually exclusive.")
+    if args.snapshot and not args.apply:
+        parser.error("--snapshot requires --apply.")
     dry_run = not args.apply
 
     output: dict = {"dry_run": dry_run, "errors": []}
     try:
-        service = MemoryService.from_config_path(args.config, memory_dir=args.memory_dir)
+        config = load_memory_config(args.config)
+        if args.memory_dir is not None:
+            config = config.with_memory_dir(args.memory_dir)
+        store = MemoryStore(config=config, read_only=dry_run)
+        llm_client = build_llm_client() if args.use_llm else None
+        service = MemoryService(config=config, store=store, llm_client=llm_client)
         result = service.consolidate(dry_run=dry_run)
         output.update(
             {
+                "consolidation_mode": "llm-assisted" if args.use_llm else "deterministic-only",
                 "counts_before": result.counts_before,
                 "counts_after": result.counts_after,
                 "stm_candidates_considered": result.stm_considered,

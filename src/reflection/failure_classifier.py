@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from src.evaluation.label_normalizer import normalize_mv2026_label
 from src.schemas.report_schema import VerificationReport
 
 
@@ -32,7 +33,8 @@ class FailureClassifier:
         human_feedback: dict | None,
     ) -> list[str]:
         modes: list[str] = []
-        predicted = report.final_status
+        predicted = normalize_mv2026_label(report.final_status)
+        ground_truth_label = normalize_mv2026_label(ground_truth_label) if ground_truth_label else None
         if ground_truth_label and ground_truth_label != predicted:
             modes.append("final_label_mismatch")
             if report.final_confidence >= 0.8:

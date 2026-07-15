@@ -24,7 +24,8 @@ def memory_metrics(
     harmful = [row for row in used_cases if correct_by_case.get(row["case_id"]) is False]
 
     metrics = {
-        "memory_retrieval_rate": sum(retrieved) / len(retrieved) if retrieved else 0.0,
+        "memory_retrieval_rate": sum(1 for count in retrieved if count > 0) / len(retrieved) if retrieved else 0.0,
+        "average_memories_retrieved_per_case": sum(retrieved) / len(retrieved) if retrieved else 0.0,
         "memory_citation_rate": len(used_cases) / len(predictions) if predictions else 0.0,
         "memory_usage_rate": len(used_cases) / len(predictions) if predictions else 0.0,
         "memory_associated_correctness_rate": (
@@ -78,8 +79,17 @@ def _store_metrics(store) -> dict:
     short_term = store.load_short_term()
     long_term = store.load_long_term()
 
-    verified = [row for row in short_term if row.verification_status == "verified"]
-    acceptance_rate = len(verified) / len(short_term) if short_term else None
+    verification_events = [event for event in store.load_consolidation_events() if event.event_type == "candidate_verification"]
+    latest_by_candidate = {}
+    for event in verification_events:
+        latest_by_candidate[event.details.get("candidate_id")] = event
+    acceptance_rate = (
+        sum(1 for event in latest_by_candidate.values() if event.details.get("verified") is True) / len(latest_by_candidate)
+        if latest_by_candidate else (
+            sum(1 for row in short_term if row.verification_status == "verified") / len(short_term)
+            if short_term else None
+        )
+    )
 
     promoted = [row for row in short_term if row.status == "promoted"]
     merged = [row for row in short_term if row.status == "merged"]
@@ -104,11 +114,15 @@ def _store_metrics(store) -> dict:
 
     return {
         "lesson_acceptance_rate": acceptance_rate,
-        "stm_to_ltm_promotion_rate": len(promoted) / len(processed) if processed else None,
-        "merge_rate": len(merged) / len(processed) if processed else None,
-        "memory_conflict_rate": len(conflicted_events) / len(processed) if processed else None,
+        "stm_to_ltm_promotion_rate": _bounded_rate(len(promoted), len(processed)),
+        "merge_rate": _bounded_rate(len(merged), len(processed)),
+        "memory_conflict_rate": _bounded_rate(len({stm_id for event in conflicted_events for stm_id in event.stm_ids}), len(processed)),
         "semantic_promotion_rate": (
-            len(semantic_promoted) / len(semantic_candidates) if semantic_candidates else None
+            _bounded_rate(len([record for record in semantic_promoted if not record.metadata.get("generalized_from_stm_ids")]), len(semantic_candidates))
+        ),
+        "semantic_generalization_rate": _bounded_rate(
+            len([record for record in semantic_promoted if record.metadata.get("generalized_from_stm_ids")]),
+            len([row for row in short_term if row.memory_type in {"episodic", "failure"}]),
         ),
         "average_independent_support": average_support,
         "active_memory_count": sum(1 for record in long_term if record.status == "active"),
@@ -116,6 +130,12 @@ def _store_metrics(store) -> dict:
         "deprecated_memory_count": sum(1 for record in long_term if record.status == "deprecated"),
         "failure_recurrence_rate": _failure_recurrence_rate(short_term),
     }
+
+
+def _bounded_rate(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return max(0.0, min(1.0, numerator / denominator))
 
 
 def _failure_recurrence_rate(short_term) -> float | None:

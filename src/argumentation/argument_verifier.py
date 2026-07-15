@@ -39,23 +39,17 @@ class ArgumentVerifier:
         )
         try:
             data = self.llm_client.generate_json(prompt)
-            valid = bool(data.get("valid", True))
+            valid = bool(data.get("valid", False))
             notes = data.get("notes") or "Verifier returned no notes."
             return argument.model_copy(
                 update={"verifier_valid": valid, "verification_notes": notes}
             )
         except Exception:
-            evidence_text = " ".join(item.content.lower() for item in linked)
-            token_overlap = sum(
-                1 for token in argument.text.lower().split()[:30] if token in evidence_text
-            )
-            valid = token_overlap > 0 or any(item.uncertainty_flags for item in linked)
-            return argument.model_copy(
-                update={
-                    "verifier_valid": valid,
-                    "verification_notes": "Deterministic verifier fallback used.",
-                }
-            )
+            return argument.model_copy(update={
+                "verifier_valid": False,
+                "verification_notes": "Argument verifier unavailable or malformed; failed closed.",
+                "uncertainty_flags": sorted(set(argument.uncertainty_flags + ["argument_verifier_failed_closed"])),
+            })
 
     def verify_all(
         self,
@@ -143,9 +137,9 @@ class ArgumentVerifier:
                 result = result_by_id.get(argument.argument_id, {})
                 verified_by_id[argument.argument_id] = argument.model_copy(
                     update={
-                        "verifier_valid": bool(result.get("valid", True)),
+                        "verifier_valid": bool(result.get("valid", False)),
                         "verification_notes": (
-                            result.get("notes") or "Batched verifier returned no notes."
+                            result.get("notes") or "Batched verifier omitted or malformed this argument; failed closed."
                         ),
                     }
                 )

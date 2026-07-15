@@ -68,7 +68,11 @@ def test_bootstrap_updates_short_term_memory_but_not_ltm_directly(tmp_path):
     stm = service.store.load_short_term()
     assert stm, "training/bootstrap must stage short-term memory"
     assert report.memory_updates_staged
-    assert {row.memory_type for row in stm} == {"episodic", "failure"}
+    assert {row.memory_type for row in stm} == {"episodic"}
+    assert all(
+        candidate.failure_type != "weak_or_missing_provenance"
+        for candidate in report.memory_update_candidates
+    )
     assert all(row.verification_status == "verified" for row in stm)
     # No direct LTM append: promotion only happens through consolidation.
     assert service.store.load_long_term() == []

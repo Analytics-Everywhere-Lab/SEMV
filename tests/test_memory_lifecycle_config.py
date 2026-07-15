@@ -55,7 +55,7 @@ def test_every_n_cases_triggers_scheduled_consolidation(tmp_path):
     assert len(service.store.load_long_term()) == 1
 
 
-def test_reject_on_conflict_false_holds_for_review(tmp_path):
+def test_reject_on_conflict_false_still_routes_verified_evidence(tmp_path):
     config = make_memory_config(tmp_path, verification={"reject_on_conflict": False})
     store = MemoryStore(config=config)
     store.append(
@@ -76,8 +76,10 @@ def test_reject_on_conflict_false_holds_for_review(tmp_path):
         )
     )
 
-    assert result.verified is False
-    assert result.verification_status == "under_review"
+    assert result.verified is True
+    assert result.verification_status == "verified"
+    assert result.semantic_relation == "contradicts"
+    assert result.related_memory_id == "mem_existing"
 
 
 def test_repeated_contradictions_deprecate_but_archive(tmp_path):
@@ -150,7 +152,7 @@ def test_conflict_ratio_recovery_reactivates_under_review_memory(tmp_path):
     assert record.status == "active"
 
 
-def test_generalization_failure_keeps_sources_in_stm(tmp_path):
+def test_generalization_failure_creates_one_stable_review_proposal(tmp_path):
     config = make_memory_config(tmp_path)
     store = MemoryStore(config=config)
     consolidator = MemoryConsolidator(
@@ -167,8 +169,15 @@ def test_generalization_failure_keeps_sources_in_stm(tmp_path):
     result = consolidator.consolidate()
 
     assert any(event.event_type == "generalization_failed" for event in result.events)
-    assert store.load_long_term() == []
-    assert all(row.status == "staged" for row in store.load_short_term())
+    proposals = store.load_long_term()
+    assert len(proposals) == 1
+    assert proposals[0].status == "under_review"
+    assert all(row.status == "under_review" for row in store.load_short_term())
+    assert all(row.promoted_to_memory_id == proposals[0].memory_id for row in store.load_short_term())
+    state_hash = store.state_hash()
+    second = consolidator.consolidate()
+    assert second.events == []
+    assert store.state_hash() == state_hash
 
 
 def test_generalization_synthesizes_verified_semantic_rule(tmp_path):

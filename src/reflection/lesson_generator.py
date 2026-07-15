@@ -91,6 +91,8 @@ class LessonGenerator:
             self._episodic_candidate(report, reflection, context, contributions, episodic)
         )
         for index, failure in enumerate(response.failures):
+            if failure.failure_type not in set(reflection.failure_modes):
+                continue
             candidates.append(self._failure_candidate(report, reflection, context, failure, index))
         if response.semantic is not None and self._is_generalizable(response.semantic, reflection):
             candidates.append(self._semantic_candidate(report, reflection, context, response.semantic))
@@ -151,6 +153,7 @@ class LessonGenerator:
             for argument in sub.top_support_arguments + sub.top_attack_arguments
         ]
         valid_argument_ids = sorted({argument.argument_id for argument in arguments})
+        argument_evidence_ids = {argument.argument_id: list(argument.evidence_ids) for argument in arguments}
         ranked = sorted(contributions.items(), key=lambda item: abs(item[1]), reverse=True)
         top_contributions = [
             {"argument_id": argument_id, "contribution": round(value, 3)}
@@ -163,6 +166,8 @@ class LessonGenerator:
                 "reliability": round(item.reliability, 2),
                 "has_provenance": bool(item.provenance),
                 "uncertainty_flags": item.uncertainty_flags[:4],
+                "content": item.content[:160],
+                "provenance": (item.provenance.model_dump(mode="json") if item.provenance else None),
             }
             for item in report.evidence[:12]
         ]
@@ -199,20 +204,16 @@ class LessonGenerator:
         dataset = metadata.get("dataset") or {}
         task = metadata.get("task") or {}
         input_meta = metadata.get("input") or {}
-        fingerprint_basis = " ".join(
-            str(part)
-            for part in [
-                dataset.get("dataset_name") or "unknown",
-                normalize_text(input_meta.get("title") or ""),
-                normalize_text(input_meta.get("caption") or ""),
-                normalize_text(input_meta.get("description") or ""),
-            ]
-        ).strip()
-        if not any([input_meta.get("title"), input_meta.get("caption"), input_meta.get("description")]):
-            fingerprint_basis = f"{dataset.get('dataset_name') or 'unknown'} {report.case_id}"
+        stable_identities = [str(value) for value in metadata.get("source_identity", []) if value]
+        if stable_identities:
+            fingerprint_basis = "|".join(sorted(set(stable_identities)))
+        else:
+            fallback = input_meta.get("caption") or input_meta.get("title") or input_meta.get("description")
+            fingerprint_basis = f"{dataset.get('dataset_name') or 'unknown'}|{normalize_text(fallback or report.case_id)}"
         return {
             "valid_evidence_ids": valid_evidence_ids,
             "valid_argument_ids": valid_argument_ids,
+            "argument_evidence_ids": argument_evidence_ids,
             "top_contributions": top_contributions,
             "evidence_summaries": evidence_summaries,
             "subclaim_summaries": subclaim_summaries,
@@ -223,6 +224,17 @@ class LessonGenerator:
             "dataset_split": dataset.get("dataset_split") or dataset.get("split"),
             "task_type": task.get("task_type"),
             "source_fingerprint": f"fp_{stable_hash_text(fingerprint_basis)}",
+        }
+
+    @staticmethod
+    def _grounding_summary(context: dict[str, Any], evidence_ids: list[str], argument_ids: list[str]) -> dict[str, Any]:
+        evidence_by_id = {row["evidence_id"]: row for row in context["evidence_summaries"]}
+        return {
+            "evidence": [evidence_by_id[eid] for eid in evidence_ids if eid in evidence_by_id],
+            "arguments": [
+                {"argument_id": aid, "evidence_ids": context.get("argument_evidence_ids", {}).get(aid, [])}
+                for aid in argument_ids
+            ],
         }
 
     # ------------------------------------------------------------- candidates
@@ -264,9 +276,16 @@ class LessonGenerator:
         kept_arguments = [aid for aid in argument_ids if aid in valid_arguments]
         invented = len(kept_evidence) != len(evidence_ids) or len(kept_arguments) != len(argument_ids)
         if not kept_evidence and not kept_arguments:
-            kept_arguments = [row["argument_id"] for row in context["top_contributions"][:3]]
-            kept_arguments = [aid for aid in kept_arguments if aid in valid_arguments]
-            kept_evidence = context["valid_evidence_ids"][:3]
+            kept_arguments = [
+                row["argument_id"] for row in context["top_contributions"][:3]
+                if row["argument_id"] in valid_arguments
+            ]
+            linked = context.get("argument_evidence_ids", {})
+            kept_evidence = sorted({
+                evidence_id for argument_id in kept_arguments
+                for evidence_id in linked.get(argument_id, [])
+                if evidence_id in valid_evidence
+            })
         del contributions
         return kept_evidence, kept_arguments, invented
 
@@ -302,6 +321,7 @@ class LessonGenerator:
             polarity="positive" if correct else "negative",
             grounding_evidence_ids=evidence_ids,
             grounding_argument_ids=argument_ids,
+            grounding=self._grounding_summary(context, evidence_ids, argument_ids),
             confidence=confidence,
             rationale="Case-level observation from post-prediction reflection.",
             verification_status="under_review" if invented else "pending",
@@ -345,6 +365,7 @@ class LessonGenerator:
             polarity="negative",
             grounding_evidence_ids=evidence_ids,
             grounding_argument_ids=argument_ids,
+            grounding=self._grounding_summary(context, evidence_ids, argument_ids),
             confidence=failure.confidence,
             rationale="Failure lesson derived from observed failure modes.",
             verification_status="under_review" if invented else "pending",
@@ -391,6 +412,7 @@ class LessonGenerator:
             polarity=None,
             grounding_evidence_ids=evidence_ids,
             grounding_argument_ids=argument_ids,
+            grounding=self._grounding_summary(context, evidence_ids, argument_ids),
             confidence=semantic.confidence,
             rationale=f"Proposed general principle: {semantic.generalizable_pattern}",
             verification_status="under_review" if invented else "pending",
@@ -423,6 +445,7 @@ class LessonGenerator:
             ),
             grounding_evidence_ids=evidence_ids,
             grounding_argument_ids=argument_ids,
+            grounding=self._grounding_summary(context, evidence_ids, argument_ids),
             confidence=min(0.6, report.final_confidence),
             rationale="Structured lesson generation failed; deterministic episodic fallback.",
             verification_status="under_review",

@@ -166,3 +166,40 @@ def test_configured_memory_types_filter(tmp_path):
     results = retriever.retrieve(case, claim, evidence=[])
 
     assert [record.memory_id for record in results] == ["mem_rule"]
+
+
+def test_optional_backend_affects_retrieval_similarity(tmp_path):
+    class CustomBackend:
+        def similarity(self, text_a, text_b):
+            return 0.9 if "backend-only-token" in (text_b or "") else 0.0
+
+        def relation(self, first, second):
+            return "unrelated"
+
+    config = make_memory_config(
+        tmp_path,
+        retrieval={"min_semantic_similarity": 0.8, "min_final_score": 0.0},
+    )
+    store = MemoryStore(config=config)
+    store.append(make_record(memory_id="mem_backend", text="backend-only-token"))
+    retriever = MemoryRetriever(store=store, config=config, similarity=CustomBackend())
+    case, claim = _case_and_claim()
+    results = retriever.retrieve(case, claim, evidence=[])
+    assert [row.memory_id for row in results] == ["mem_backend"]
+    assert results[0].metadata["retrieval_components"]["semantic_similarity"] == 0.9
+
+
+def test_retrieval_metadata_exposes_all_components_without_persisting(tmp_path):
+    retriever = _retriever(
+        tmp_path,
+        [make_record(memory_id="mem_components", text="port explosion location")],
+        retrieval={"min_similarity": 0.0},
+    )
+    case, claim = _case_and_claim()
+    result = retriever.retrieve(case, claim, evidence=[])[0]
+    assert set(result.metadata["retrieval_components"]) == {
+        "semantic_similarity", "compatibility", "evidence_pattern_score",
+        "confidence_contribution", "support_contribution", "usage_contribution", "final_score",
+    }
+    persisted = retriever.store.load_long_term()[0]
+    assert "retrieval_components" not in persisted.metadata

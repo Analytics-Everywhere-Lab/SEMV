@@ -29,6 +29,7 @@ def evaluate_cosmos(
     llm_client=None,
     memory_service=None,
     update_memory: bool = False,
+    allow_memory_retrieval: bool = True,
 ) -> dict:
     metadata_path = _resolve(cosmos_metadata)
     if not metadata_path.exists():
@@ -58,6 +59,7 @@ def evaluate_cosmos(
                         "allow_web_search": False,
                         "allow_reverse_search": False,
                         "allow_memory_update": update_memory,
+                        "allow_memory_retrieval": allow_memory_retrieval,
                     }
                 )
             }

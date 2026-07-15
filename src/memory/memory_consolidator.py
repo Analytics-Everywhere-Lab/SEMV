@@ -79,6 +79,10 @@ class MemoryConsolidator:
     # ----------------------------------------------------------- consolidation
 
     def consolidate(self, dry_run: bool = False) -> ConsolidationResult:
+        with self.store.transaction():
+            return self._consolidate_locked(dry_run=dry_run)
+
+    def _consolidate_locked(self, dry_run: bool = False) -> ConsolidationResult:
         result = ConsolidationResult(dry_run=dry_run, counts_before=self.store.counts())
         events: list[ConsolidationEvent] = []
         now = datetime.now(timezone.utc)
@@ -89,6 +93,10 @@ class MemoryConsolidator:
         changed_ltm: dict[str, MemoryRecord] = {}
         stm_updates: dict[str, ShortTermMemoryRecord] = {}
         archived_stm: list[ShortTermMemoryRecord] = []
+
+        usage_updates, usage_events = self._rollup_usage(ltm_by_id)
+        changed_ltm.update(usage_updates)
+        events.extend(usage_events)
 
         # A. Select verified, unprocessed STM records; expire stale ones.
         cutoff = now - timedelta(days=self.config.short_term.ttl_days)
@@ -106,7 +114,7 @@ class MemoryConsolidator:
                 result.expired.append(record.stm_id)
                 events.append(
                     ConsolidationEvent(
-                        event_id=f"evt_{stable_hash_text('expired' + record.stm_id + utc_now_iso())}",
+                        event_id=f"evt_{stable_hash_text('expired' + record.stm_id)}",
                         event_type="expired",
                         stm_ids=[record.stm_id],
                         details={"ttl_days": self.config.short_term.ttl_days},
@@ -129,9 +137,10 @@ class MemoryConsolidator:
         remaining: list[ShortTermMemoryRecord] = []
         for record in actionable:
             relation, target = self._best_ltm_relation(record, current_ltm())
-            if relation in {"equivalent", "entails"} and target is not None:
+            if relation in {"equivalent", "entails", "a_entails_b", "b_entails_a"} and target is not None:
                 updated, incremented = self._merge_support(target, record, relation)
-                changed_ltm[updated.memory_id] = updated
+                if incremented:
+                    changed_ltm[updated.memory_id] = updated
                 stm_updates[record.stm_id] = record.model_copy(
                     update={
                         "status": "merged",
@@ -164,9 +173,10 @@ class MemoryConsolidator:
                 )
             elif relation == "contradicts" and target is not None:
                 updated, counted = self._apply_conflict(target, record)
-                changed_ltm[updated.memory_id] = updated
+                if counted:
+                    changed_ltm[updated.memory_id] = updated
                 stm_updates[record.stm_id] = record.model_copy(
-                    update={"status": "under_review", "updated_at": utc_now_iso()}
+                    update={"status": "under_review", "promoted_to_memory_id": updated.memory_id, "updated_at": utc_now_iso()}
                 )
                 result.conflicted.append(record.stm_id)
                 if updated.status == "under_review" and target.status != "under_review":
@@ -223,11 +233,32 @@ class MemoryConsolidator:
             else:
                 # G. Repeated observations that cannot merge into LTM may still
                 # generalize into one synthesized semantic rule.
-                generalized = self._try_generalize(cluster, events)
-                if generalized is not None:
-                    changed_ltm[generalized.memory_id] = generalized
+                generalized = self._try_generalize(cluster, current_ltm(), events)
+                if generalized is None:
+                    for record in cluster:
+                        result.unchanged.append(record.stm_id)
+                    continue
+                generalized_record, verified, existed, changed, support_added = generalized
+                if changed:
+                    changed_ltm[generalized_record.memory_id] = generalized_record
+                if support_added and existed:
+                    result.support_increments[generalized_record.memory_id] = support_added
                 for record in cluster:
-                    result.unchanged.append(record.stm_id)
+                    if verified:
+                        terminal = "merged" if existed else "promoted"
+                        stm_updates[record.stm_id] = record.model_copy(update={
+                            "status": terminal,
+                            "promoted_to_memory_id": generalized_record.memory_id,
+                            "updated_at": utc_now_iso(),
+                        })
+                        getattr(result, terminal).append(record.stm_id)
+                    else:
+                        stm_updates[record.stm_id] = record.model_copy(update={
+                            "status": "under_review",
+                            "promoted_to_memory_id": generalized_record.memory_id,
+                            "updated_at": utc_now_iso(),
+                        })
+                        result.under_review.append(record.stm_id)
 
         # I. Lifecycle re-check across affected long-term records.
         for memory_id, record in list(changed_ltm.items()):
@@ -268,40 +299,51 @@ class MemoryConsolidator:
             result.counts_after = result.counts_before
 
         result.finished_at = utc_now_iso()
+        result.state_hash = self.store.state_hash()
         return result
 
     # ------------------------------------------------------------- relations
 
     def _best_ltm_relation(
-        self,
-        record: ShortTermMemoryRecord,
-        ltm: list[MemoryRecord],
+        self, record: ShortTermMemoryRecord, ltm: list[MemoryRecord]
     ) -> tuple[str, MemoryRecord | None]:
+        if record.semantic_relation == "contradicts" and record.related_memory_id:
+            target = next(
+                (item for item in ltm if item.memory_id == record.related_memory_id and item.status in {"active", "under_review"}),
+                None,
+            )
+            if target is not None:
+                return "contradicts", target
         candidates = [
-            item
-            for item in ltm
-            if item.memory_type == record.memory_type
-            and item.status in {"active", "under_review"}
+            item for item in ltm
+            if item.memory_type == record.memory_type and item.status in {"active", "under_review"}
         ]
         if not candidates:
             return "unrelated", None
         items = [item.model_dump() for item in candidates]
-        by_id = {item.memory_id: item for item in candidates}
-        record_item = record.model_dump()
         if hasattr(self.similarity, "shortlist"):
             shortlisted = [
-                item
-                for _, item in self.similarity.shortlist(  # type: ignore[attr-defined]
+                item for _, item in self.similarity.shortlist(
                     record.text, items, k=self.config.similarity.lexical_shortlist_k
                 )
             ]
         else:
             shortlisted = items
-        for item in shortlisted:
-            relation = self.similarity.relation(record_item, item)
-            if relation != "unrelated":
-                return relation, by_id.get(item.get("memory_id", ""))
-        return "unrelated", None
+        pairs = [(record.model_dump(), item) for item in shortlisted]
+        relations = self.similarity.relations_batch(pairs) if hasattr(self.similarity, "relations_batch") else [
+            self.similarity.relation(a, b) for a, b in pairs
+        ]
+        by_id = {item.memory_id: item for item in candidates}
+        priority = {"equivalent": 4, "contradicts": 3, "a_entails_b": 2, "b_entails_a": 2, "entails": 2}
+        ranked = [
+            (priority.get(relation, 0), self.similarity.similarity(record.text, item.get("text") or ""), relation, item)
+            for relation, item in zip(relations, shortlisted)
+            if relation != "unrelated"
+        ]
+        if not ranked:
+            return "unrelated", None
+        _, _, relation, item = max(ranked, key=lambda value: (value[0], value[1]))
+        return relation, by_id.get(item.get("memory_id", ""))
 
     # ---------------------------------------------------------------- merging
 
@@ -370,7 +412,8 @@ class MemoryConsolidator:
         fingerprint = record.source_fingerprint or f"fp_case_{record.source_case_id}"
         metadata = dict(target.metadata)
         conflict_fingerprints = list(metadata.get("conflict_fingerprints", []))
-        if fingerprint in conflict_fingerprints:
+        conflict_case_ids = list(metadata.get("conflict_case_ids", []))
+        if fingerprint in conflict_fingerprints or record.source_case_id in conflict_case_ids:
             return target, False
 
         alpha, beta = self._prior(target)
@@ -378,9 +421,11 @@ class MemoryConsolidator:
         beta += record.confidence
         confidence = alpha / (alpha + beta)
         conflict_fingerprints.append(fingerprint)
+        conflict_case_ids.append(record.source_case_id)
         metadata["alpha"] = alpha
         metadata["beta"] = beta
         metadata["conflict_fingerprints"] = conflict_fingerprints
+        metadata["conflict_case_ids"] = conflict_case_ids
 
         conflict_count = target.conflict_count + 1
         status = target.status
@@ -435,7 +480,7 @@ class MemoryConsolidator:
                 still_unassigned = []
                 for other in unassigned:
                     relation = self.similarity.relation(seed.model_dump(), other.model_dump())
-                    if relation in {"equivalent", "entails"}:
+                    if relation in {"equivalent", "entails", "a_entails_b", "b_entails_a"}:
                         cluster.append(other)
                     else:
                         still_unassigned.append(other)
@@ -463,6 +508,7 @@ class MemoryConsolidator:
             unique[fingerprint] = record
             cases.add(record.source_case_id)
         distinct_sources = len(unique)
+        distinct_cases = len(cases)
 
         alpha = sum(record.confidence for record in unique.values())
         beta = sum(1.0 - record.confidence for record in unique.values())
@@ -477,7 +523,11 @@ class MemoryConsolidator:
             # single case never becomes a universal semantic rule.
             min_cases = 1
 
-        if distinct_sources < min_cases or confidence < thresholds.min_confidence:
+        if (
+            distinct_cases < min_cases
+            or distinct_sources < thresholds.min_distinct_sources
+            or confidence < thresholds.min_confidence
+        ):
             return None
         if not representative.grounding_evidence_ids and not representative.grounding_argument_ids:
             return None
@@ -548,58 +598,108 @@ class MemoryConsolidator:
     def _try_generalize(
         self,
         cluster: list[ShortTermMemoryRecord],
+        existing_ltm: list[MemoryRecord],
         events: list[ConsolidationEvent],
-    ) -> MemoryRecord | None:
-        if not self.config.consolidation.generalize_repeated_episodes:
-            return None
-        if self.llm_client is None:
+    ) -> tuple[MemoryRecord, bool, bool, bool, int] | None:
+        if not self.config.consolidation.generalize_repeated_episodes or not cluster:
             return None
         if cluster[0].memory_type not in {"episodic", "failure"}:
             return None
-        fingerprints = {
-            record.source_fingerprint or f"fp_case_{record.source_case_id}" for record in cluster
-        }
-        required = max(
-            self.config.consolidation.min_distinct_sources,
-            self.config.consolidation.semantic_rule.min_distinct_cases,
+        unique: dict[tuple[str, str], ShortTermMemoryRecord] = {}
+        for row in cluster:
+            fingerprint = row.source_fingerprint or f"fp_case_{row.source_case_id}"
+            unique.setdefault((row.source_case_id, fingerprint), row)
+        cases = {case_id for case_id, _ in unique}
+        fingerprints = {fingerprint for _, fingerprint in unique}
+        source_signature = cluster[0].semantic_signature or semantic_signature(
+            cluster[0].memory_type, cluster[0].claim_type, cluster[0].task_type,
+            cluster[0].failure_type, cluster[0].polarity, cluster[0].applicability_scope,
         )
-        if len(fingerprints) < required:
+        existing_source_rule = None
+        for candidate_rule in existing_ltm:
+            metadata = candidate_rule.metadata or {}
+            if (
+                candidate_rule.memory_type != "semantic_rule"
+                or candidate_rule.status not in {"active", "under_review"}
+                or metadata.get("source_memory_type") != cluster[0].memory_type
+                or metadata.get("source_semantic_signature") != source_signature
+            ):
+                continue
+            prototypes = metadata.get("source_observation_texts", [])
+            if any(normalize_text(row.text) == normalize_text(prototype) for row in unique.values() for prototype in prototypes):
+                existing_source_rule = candidate_rule
+                break
+            for row in unique.values():
+                for prototype in prototypes:
+                    prototype_item = {
+                        **row.model_dump(),
+                        "text": prototype,
+                        "canonical_key": None,
+                    }
+                    if self.similarity.relation(row.model_dump(), prototype_item) in {"equivalent", "a_entails_b", "b_entails_a", "entails"}:
+                        existing_source_rule = candidate_rule
+                        break
+                if existing_source_rule is not None:
+                    break
+            if existing_source_rule is not None:
+                break
+        if existing_source_rule is not None:
+            verified_existing = existing_source_rule.status == "active" and not existing_source_rule.metadata.get("proposal_only", False)
+            updated, added = self._merge_generalized_support(existing_source_rule, list(unique.values()), verified_existing)
+            changed = updated != existing_source_rule
+            if changed:
+                stm_ids = sorted(row.stm_id for row in cluster)
+                events.append(ConsolidationEvent(
+                    event_id=f"evt_{stable_hash_text('generalized_support' + existing_source_rule.memory_id + '|'.join(stm_ids))}",
+                    event_type="support_increment",
+                    memory_id=existing_source_rule.memory_id,
+                    stm_ids=stm_ids,
+                    details={"generalized": True, "new_support": added},
+                ))
+            return updated, verified_existing, True, changed, added
+        thresholds = self.config.consolidation.semantic_rule
+        if len(cases) < thresholds.min_distinct_cases or len(fingerprints) < thresholds.min_distinct_sources:
             return None
 
-        observations = [
-            {"case_id": record.source_case_id, "text": record.text} for record in cluster
-        ]
-        prompt = (
-            "These repeated observations from independent multimedia verification cases "
-            "form one cluster. Synthesize ONE generalized rule as JSON: "
-            '{"trigger_pattern": "...", "lesson": "...", "evidence_pattern": "...", '
-            '"argument_pattern": "...", "recommended_action": "...", '
-            '"applicability_scope": "...", "exceptions": [...], "confidence": 0.0-1.0}\n'
-            f"Observations: {observations}"
-        )
+        observations = [{"case_id": row.source_case_id, "text": row.text} for row in unique.values()]
+        synthesized = True
+        rule: _GeneralizedRule
         try:
+            if self.llm_client is None:
+                raise RuntimeError("llm_generalization_unavailable")
+            prompt = (
+                "These repeated observations from independent multimedia verification cases "
+                "form one cluster. Synthesize ONE generalized rule as JSON: "
+                '{"trigger_pattern": "...", "lesson": "...", "evidence_pattern": "...", '
+                '"argument_pattern": "...", "recommended_action": "...", '
+                '"applicability_scope": "...", "exceptions": [...], "confidence": 0.0-1.0}\n'
+                f"Observations: {observations}"
+            )
             rule = _GeneralizedRule.model_validate(self.llm_client.generate_json(prompt))
         except Exception as exc:
-            logger.warning("Rule generalization failed: %s", exc)
-            events.append(
-                ConsolidationEvent(
-                    event_id=f"evt_{stable_hash_text('genfail' + cluster[0].stm_id)}",
-                    event_type="generalization_failed",
-                    stm_ids=[record.stm_id for record in cluster],
-                    details={"reason": "llm_generalization_unavailable"},
-                )
+            synthesized = False
+            representative = max(unique.values(), key=lambda row: row.confidence)
+            rule = _GeneralizedRule(
+                trigger_pattern=representative.trigger_pattern or representative.text,
+                lesson=representative.lesson or representative.text,
+                evidence_pattern=representative.evidence_pattern,
+                argument_pattern=representative.argument_pattern,
+                recommended_action=representative.recommended_action or "Review the repeated pattern before reuse.",
+                applicability_scope=representative.applicability_scope,
+                exceptions=list(representative.exceptions),
+                confidence=min(0.6, representative.confidence),
             )
-            return None
+            logger.warning("Rule generalization held for review: %s", exc)
 
-        verified = self._verify_generalization(rule, observations)
-        status = "active" if verified else "under_review"
-        memory_id = f"mem_{stable_hash_text('generalized' + normalize_text(rule.lesson))}"
+        verified = synthesized and self._verify_generalization(rule, observations)
+        claim_type = cluster[0].claim_type or "general"
+        rule_key = canonical_key("semantic_rule", claim_type, cluster[0].task_type, rule.lesson)
         now = utc_now_iso()
-        record = MemoryRecord(
-            memory_id=memory_id,
+        proposed = MemoryRecord(
+            memory_id=f"mem_{stable_hash_text(rule_key)}",
             memory_type="semantic_rule",
             memory_level="long_term",
-            claim_type=cluster[0].claim_type or "general",
+            claim_type=claim_type,
             task_type=cluster[0].task_type,
             text=rule.lesson,
             trigger_pattern=rule.trigger_pattern,
@@ -607,39 +707,126 @@ class MemoryConsolidator:
             evidence_pattern=rule.evidence_pattern,
             argument_pattern=rule.argument_pattern,
             recommended_action=rule.recommended_action,
-            canonical_key=canonical_key(
-                "semantic_rule", cluster[0].claim_type or "general", cluster[0].task_type, rule.lesson
+            canonical_key=rule_key,
+            semantic_signature=semantic_signature(
+                "semantic_rule", claim_type, cluster[0].task_type, None, None, rule.applicability_scope
             ),
             applicability_scope=rule.applicability_scope,
             exceptions=list(rule.exceptions),
-            source_case_ids=sorted({record.source_case_id for record in cluster}),
+            source_case_ids=sorted(cases),
             source_fingerprints=sorted(fingerprints),
-            source_datasets=sorted({r.dataset_name for r in cluster if r.dataset_name}),
-            source_splits=sorted({r.dataset_split for r in cluster if r.dataset_split}),
+            source_datasets=sorted({row.dataset_name for row in unique.values() if row.dataset_name}),
+            source_splits=sorted({row.dataset_split for row in unique.values() if row.dataset_split}),
             tags=["semantic_rule", "generalized"],
             confidence=min(rule.confidence, 0.9),
-            support_count=len(fingerprints),
-            status=status,
+            support_count=len(unique),
+            support_weight=sum(row.confidence for row in unique.values()),
+            status="active" if verified else "under_review",
             origin="consolidated",
             verified_by="memory_consolidator_generalization" if verified else None,
             created_at=now,
             updated_at=now,
             metadata={
-                "generalized_from_stm_ids": [record.stm_id for record in cluster],
-                "alpha": sum(r.confidence for r in cluster),
-                "beta": sum(1.0 - r.confidence for r in cluster),
+                "generalized_from_stm_ids": sorted(row.stm_id for row in cluster),
+                "alpha": sum(row.confidence for row in unique.values()),
+                "beta": sum(1.0 - row.confidence for row in unique.values()),
+                "generalization_verified": verified,
+                "proposal_only": not verified,
+                "source_memory_type": cluster[0].memory_type,
+                "source_semantic_signature": source_signature,
+                "source_observation_texts": sorted({normalize_text(row.text) for row in unique.values()}),
             },
         )
-        events.append(
-            ConsolidationEvent(
-                event_id=f"evt_{stable_hash_text('generalized' + memory_id)}",
-                event_type="generalized",
-                memory_id=memory_id,
-                stm_ids=[record.stm_id for record in cluster],
-                details={"verified_against_sources": verified, "status": status},
-            )
+
+        target = next(
+            (row for row in existing_ltm if row.memory_type == "semantic_rule" and row.status in {"active", "under_review"}
+             and (row.canonical_key or "") == rule_key),
+            None,
         )
-        return record
+        if target is None:
+            candidates = [row for row in existing_ltm if row.memory_type == "semantic_rule" and row.status in {"active", "under_review"}]
+            relations = self.similarity.relations_batch(
+                [(proposed.model_dump(), row.model_dump()) for row in candidates]
+            ) if candidates and hasattr(self.similarity, "relations_batch") else [
+                self.similarity.relation(proposed.model_dump(), row.model_dump()) for row in candidates
+            ]
+            related = [
+                (self.similarity.similarity(proposed.text, row.text), row)
+                for row, relation in zip(candidates, relations)
+                if relation in {"equivalent", "a_entails_b", "b_entails_a", "entails"}
+            ]
+            if related:
+                target = max(related, key=lambda pair: pair[0])[1]
+
+        stm_ids = sorted(row.stm_id for row in cluster)
+        if target is None:
+            event_type = "generalized" if verified else "generalization_failed"
+            events.append(ConsolidationEvent(
+                event_id=f"evt_{stable_hash_text(event_type + proposed.memory_id + '|'.join(stm_ids))}",
+                event_type=event_type,
+                memory_id=proposed.memory_id,
+                stm_ids=stm_ids,
+                details={"verified_against_sources": verified, "status": proposed.status, "proposal_created": True},
+            ))
+            return proposed, verified, False, True, len(unique)
+
+        updated, added = self._merge_generalized_support(target, list(unique.values()), verified)
+        changed = updated != target
+        if changed:
+            events.append(ConsolidationEvent(
+                event_id=f"evt_{stable_hash_text('generalized_support' + target.memory_id + '|'.join(stm_ids))}",
+                event_type="support_increment",
+                memory_id=target.memory_id,
+                stm_ids=stm_ids,
+                details={"generalized": True, "new_support": added},
+            ))
+        return updated, verified, True, changed, added
+
+    def _merge_generalized_support(
+        self, target: MemoryRecord, rows: list[ShortTermMemoryRecord], verified: bool
+    ) -> tuple[MemoryRecord, int]:
+        cases = set(target.source_case_ids)
+        fingerprints = set(target.source_fingerprints)
+        unseen = []
+        for row in rows:
+            fingerprint = row.source_fingerprint or f"fp_case_{row.source_case_id}"
+            if row.source_case_id in cases or fingerprint in fingerprints:
+                continue
+            cases.add(row.source_case_id)
+            fingerprints.add(fingerprint)
+            unseen.append(row)
+        should_activate = verified and bool(target.metadata.get("proposal_only"))
+        if not unseen and not should_activate:
+            return target, 0
+        alpha, beta = self._prior(target)
+        for row in unseen:
+            alpha += row.confidence
+            beta += 1.0 - row.confidence
+        metadata = dict(target.metadata)
+        metadata.update({"alpha": alpha, "beta": beta})
+        metadata["source_observation_texts"] = sorted(
+            set(metadata.get("source_observation_texts", [])) | {normalize_text(row.text) for row in unseen}
+        )
+        metadata["generalized_from_stm_ids"] = sorted(
+            set(metadata.get("generalized_from_stm_ids", [])) | {row.stm_id for row in rows}
+        )
+        if should_activate:
+            metadata.update({"proposal_only": False, "generalization_verified": True})
+        return target.model_copy(update={
+            "version": target.version + 1,
+            "confidence": alpha / (alpha + beta),
+            "support_count": target.support_count + len(unseen),
+            "support_weight": target.support_weight + sum(row.confidence for row in unseen),
+            "source_case_ids": sorted(cases),
+            "source_fingerprints": sorted(fingerprints),
+            "source_datasets": sorted(set(target.source_datasets) | {row.dataset_name for row in unseen if row.dataset_name}),
+            "source_splits": sorted(set(target.source_splits) | {row.dataset_split for row in unseen if row.dataset_split}),
+            "status": "active" if should_activate else target.status,
+            "verified_by": "memory_consolidator_generalization" if should_activate else target.verified_by,
+            "last_confirmed_at": utc_now_iso() if unseen else target.last_confirmed_at,
+            "updated_at": utc_now_iso(),
+            "metadata": metadata,
+        }), len(unseen)
 
     def _verify_generalization(self, rule: _GeneralizedRule, observations: list[dict]) -> bool:
         prompt = (
@@ -652,6 +839,62 @@ class MemoryConsolidator:
             return bool(data.get("consistent_with_all", False))
         except Exception:
             return False
+
+    def _rollup_usage(
+        self, ltm_by_id: dict[str, MemoryRecord]
+    ) -> tuple[dict[str, MemoryRecord], list[ConsolidationEvent]]:
+        grouped: dict[tuple[str, str, str], list] = {}
+        for event in self.store.load_usage_events():
+            split = (event.dataset_split or "").lower()
+            if event.frozen or split in {"validation", "val", "dev", "test", "test_hidden"}:
+                continue
+            if event.stage not in {"planner_cited", "argument_cited"}:
+                continue
+            key = (event.run_id or event.case_id, event.case_id, event.memory_id)
+            grouped.setdefault(key, []).append(event)
+        updates: dict[str, MemoryRecord] = {}
+        consolidation_events: list[ConsolidationEvent] = []
+        by_memory: dict[str, list[tuple[str, str, list]]] = {}
+        for (run_id, case_id, memory_id), rows in grouped.items():
+            by_memory.setdefault(memory_id, []).append((run_id, case_id, rows))
+        for memory_id, uses in by_memory.items():
+            target = ltm_by_id.get(memory_id)
+            if target is None:
+                continue
+            metadata = dict(target.metadata)
+            processed = set(metadata.get("usage_use_ids", []))
+            additions = []
+            for run_id, case_id, rows in uses:
+                use_id = f"usage_{stable_hash_text(run_id + case_id + memory_id)}"
+                if use_id in processed:
+                    continue
+                outcomes = {row.outcome for row in rows}
+                outcome = "contested" if "contested" in outcomes else (
+                    "successful" if "successful" in outcomes else "unknown"
+                )
+                additions.append((use_id, outcome, max((row.created_at or "") for row in rows)))
+            if not additions:
+                continue
+            processed.update(use_id for use_id, _, _ in additions)
+            metadata["usage_use_ids"] = sorted(processed)
+            updated = target.model_copy(update={
+                "version": target.version + 1,
+                "usage_count": target.usage_count + len(additions),
+                "successful_usage_count": target.successful_usage_count + sum(1 for _, outcome, _ in additions if outcome == "successful"),
+                "contested_usage_count": target.contested_usage_count + sum(1 for _, outcome, _ in additions if outcome == "contested"),
+                "last_used_at": max(timestamp for _, _, timestamp in additions) or target.last_used_at,
+                "updated_at": utc_now_iso(),
+                "metadata": metadata,
+            })
+            updates[memory_id] = updated
+            use_ids = sorted(use_id for use_id, _, _ in additions)
+            consolidation_events.append(ConsolidationEvent(
+                event_id=f"evt_{stable_hash_text('usage_rollup' + memory_id + '|'.join(use_ids))}",
+                event_type="usage_rollup",
+                memory_id=memory_id,
+                details={"use_ids": use_ids, "count": len(additions)},
+            ))
+        return updates, consolidation_events
 
     # -------------------------------------------------------------- lifecycle
 
@@ -699,6 +942,7 @@ class MemoryConsolidator:
             return under_review
         if (
             record.status == "under_review"
+            and not record.metadata.get("proposal_only", False)
             and ratio <= self.config.consolidation.max_conflict_ratio
             and record.confidence >= self.config.consolidation.deprecate_confidence_below
         ):

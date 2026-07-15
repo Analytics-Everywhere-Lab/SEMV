@@ -5,7 +5,7 @@ import logging
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from src.aggregation.final_decision_aggregator import FinalDecisionAggregator
 from src.contestation.adaptive_revision_executor import execute_adaptive_revision
@@ -69,6 +69,7 @@ def run_case_bundle(
     save_case_trace: bool = True,
     exclude_rejected_arguments: bool = True,
     memory_service: MemoryService | None = None,
+    post_prediction_supervision_provider: Callable[[], str | dict | None] | None = None,
 ) -> VerificationReport:
     if mode not in {"inference_only", "self_evolving", "test", "bootstrap_memory"}:
         raise ValueError("mode must be inference_only, self_evolving, test, or bootstrap_memory")
@@ -96,7 +97,10 @@ def run_case_bundle(
             evidence=raw_evidence,
         )
 
-    shared_memory_service = memory_service or MemoryService(llm_client=shared_llm_client)
+    shared_memory_service = memory_service or MemoryService(
+        llm_client=shared_llm_client,
+        frozen=mode in {"inference_only", "test"},
+    )
     if bundle.run_config.allow_memory_retrieval:
         memory_by_claim = shared_memory_service.retrieve_for_claims(
             bundle=bundle,
@@ -211,6 +215,7 @@ def run_case_bundle(
                 "dataset": bundle.dataset.model_dump(mode="json"),
                 "task": bundle.task.model_dump(mode="json"),
                 "input": bundle.input.model_dump(mode="json"),
+                "source_identity": _source_identity(bundle),
                 "gold_visibility": bundle.gold.gold_visibility,
                 "used_memory_ids": sorted(used_memory_ids),
             }
@@ -291,6 +296,7 @@ def run_case_bundle(
                     "dataset": bundle.dataset.model_dump(mode="json"),
                     "task": bundle.task.model_dump(mode="json"),
                     "input": bundle.input.model_dump(mode="json"),
+                    "source_identity": _source_identity(bundle),
                     "gold_visibility": bundle.gold.gold_visibility,
                     "enable_adaptive_revision": use_adaptive_revision,
                     "adaptive_revision_executed": use_adaptive_revision,
@@ -305,9 +311,22 @@ def run_case_bundle(
             }
         )
 
+    if review_batch is not None:
+        _log_contested_memory_usage(shared_memory_service, bundle, review_batch, original_arguments)
+
     if mode in {"self_evolving", "bootstrap_memory"} and (
-        bundle.gold.gold_final_label or bundle.gold.gold_report_available
+        bundle.gold.gold_final_label
+        or bundle.gold.gold_report_available
+        or review_batch is not None
+        or post_prediction_supervision_provider is not None
     ):
+        supervision = (
+            post_prediction_supervision_provider()
+            if post_prediction_supervision_provider is not None
+            else bundle.gold.gold_final_label
+        )
+        if isinstance(supervision, dict):
+            supervision = supervision.get("gold_final_label") or supervision.get("label")
         # Gold is only revealed here, after the report (prediction) exists.
         # Only training/bootstrap runs may stage short-term memory; a frozen
         # memory service (validation/test snapshots) never updates.
@@ -319,7 +338,7 @@ def run_case_bundle(
             memory_service=shared_memory_service,
         ).reflect(
             report=report,
-            ground_truth_label=bundle.gold.gold_final_label,
+            ground_truth_label=supervision,
             human_feedback=(
                 {
                     "human_review_batch": review_batch.model_dump(mode="json"),
@@ -1023,6 +1042,21 @@ def _uncertainty_reason(arguments: list[Argument], graph_flags: list[str]) -> st
     return ", ".join(sorted(flags))
 
 
+def _source_identity(bundle: CaseBundle) -> list[str]:
+    identities: list[str] = []
+    if bundle.input.social_media_link:
+        identities.append(f"url:{bundle.input.social_media_link.strip().lower()}")
+    for asset in bundle.media_assets:
+        if asset.source_url:
+            identities.append(f"url:{asset.source_url.strip().lower()}")
+        if asset.local_path:
+            identities.append(f"path:{Path(asset.local_path).as_posix()}")
+        for key in ("content_hash", "sha256", "cached_content_hash"):
+            if asset.metadata.get(key):
+                identities.append(f"hash:{asset.metadata[key]}")
+    return sorted(set(identities))
+
+
 def _flatten_memory(groups) -> list[MemoryRecord]:
     flattened: dict[str, MemoryRecord] = {}
     for group in groups:
@@ -1087,11 +1121,30 @@ def _log_memory_usage(
                     stage="argument_cited",
                     claim_id=argument.claim_id,
                     argument_id=argument.argument_id,
+                    outcome="successful" if argument.verifier_valid is True else "unknown",
                     dataset_name=dataset_name,
                     dataset_split=dataset_split,
                 )
     except Exception:
         logger.warning("Memory usage logging failed for case %s", bundle.case_id, exc_info=True)
+
+
+def _log_contested_memory_usage(
+    service: MemoryService, bundle: CaseBundle, review_batch: HumanReviewBatch, arguments: list[Argument]
+) -> None:
+    contested_ids = {
+        row.target_argument_id for row in review_batch.contestations
+        if row.action in {"reject", "edit"} and row.target_argument_id
+    }
+    for argument in arguments:
+        if argument.argument_id not in contested_ids:
+            continue
+        for memory_id in argument.metadata.get("used_memory_ids", []) or []:
+            service.log_usage(
+                case_id=bundle.case_id, memory_id=memory_id, stage="argument_cited",
+                claim_id=argument.claim_id, argument_id=argument.argument_id, outcome="contested",
+                dataset_name=bundle.dataset.dataset_name, dataset_split=bundle.dataset.dataset_split,
+            )
 
 
 def _parse_bool(value: str | bool) -> bool:

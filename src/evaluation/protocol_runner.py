@@ -32,6 +32,7 @@ def run_protocol(
     protocol: str | None = None,
     output_dir: str | Path | None = None,
     llm_client=None,
+    resume: bool | None = None,
 ) -> dict:
     config = read_yaml(config_path)
     evaluation = config.get("evaluation", {})
@@ -40,6 +41,13 @@ def run_protocol(
     selected = protocol or protocol_cfg.get("name", "static")
     out = _resolve(output_dir or "data/outputs/evaluation/joint_mv_cosmos")
     out.mkdir(parents=True, exist_ok=True)
+    resume_run = protocol_cfg.get("resume", False) if resume is None else resume
+    _ensure_clean_memory_dir(out / "memory", resume=bool(resume_run))
+    gold_stage = protocol_cfg.get("gold_reading_stage")
+    if gold_stage not in {None, "post_prediction", "after_prediction_only"}:
+        raise ValueError("gold_reading_stage must be post_prediction when configured.")
+    if protocol_cfg.get("allow_memory_update_test", False):
+        raise ValueError("allow_memory_update_test=true is forbidden for validation/test phases.")
 
     memory_config_path = evaluation.get("memory_config", "configs/memory.yaml")
 
@@ -69,6 +77,7 @@ def _run_static(datasets, protocol_cfg, out: Path, llm_client, memory_config_pat
     """Frozen memory, retrieval optional, no updates."""
     service = MemoryService.from_config_path(
         memory_config_path,
+        memory_dir=out / "memory",
         llm_client=llm_client,
         frozen=True,
         usage_log_path=out / "memory_usage_events.jsonl",
@@ -78,7 +87,8 @@ def _run_static(datasets, protocol_cfg, out: Path, llm_client, memory_config_pat
         datasets,
         out,
         llm_client,
-        memory_service=service if protocol_cfg.get("allow_memory_retrieval", True) else None,
+        memory_service=service,
+        allow_memory_retrieval=protocol_cfg.get("allow_memory_retrieval", True),
         update_memory=False,
         results=results,
     )
@@ -100,12 +110,12 @@ def _run_prequential(datasets, protocol_cfg, out: Path, llm_client, memory_confi
     seed_semantic_rules(store=service.store)
     results = {"protocol": "prequential", "runs": {}, "memory_dir": str(memory_dir)}
     train_cfg = _train_phase_config(datasets, protocol_cfg)
-    results["runs"]["train"] = _evaluate_phase(
+    results["runs"]["train_{}_{}".format(train_cfg["dataset"], train_cfg.get("split") or "default")] = _evaluate_phase(
         train_cfg,
         out / "prequential",
         llm_client,
         memory_service=service,
-        update_memory=True,
+        update_memory=protocol_cfg.get("allow_memory_update_train", True),
     )
     final = service.consolidate()
     results["final_consolidation"] = {
@@ -136,12 +146,12 @@ def _run_train_memory_freeze_test(
     results: dict = {"protocol": "train_memory_freeze_test", "runs": {}, "memory_dir": str(memory_dir)}
 
     train_cfg = _train_phase_config(datasets, protocol_cfg)
-    results["runs"]["train"] = _evaluate_phase(
+    results["runs"]["train_{}_{}".format(train_cfg["dataset"], train_cfg.get("split") or "default")] = _evaluate_phase(
         train_cfg,
         out / "train",
         llm_client,
         memory_service=train_service,
-        update_memory=True,
+        update_memory=protocol_cfg.get("allow_memory_update_train", True),
     )
 
     final = train_service.consolidate()
@@ -167,7 +177,7 @@ def _run_train_memory_freeze_test(
 
     for phase in _eval_phase_configs(datasets, protocol_cfg):
         phase_out = out / "eval" / f"{phase['dataset']}_{phase.get('split') or 'default'}"
-        results["runs"][f"eval_{phase['dataset']}"] = _evaluate_phase(
+        results["runs"][f"eval_{phase['dataset']}_{phase.get('split') or 'default'}"] = _evaluate_phase(
             phase,
             phase_out,
             llm_client,
@@ -190,7 +200,7 @@ def _run_transfer(datasets, protocol_cfg, out: Path, llm_client, memory_config_p
     """Build memory only from the configured MV2026 training split, freeze it,
     and evaluate COSMOS without updates."""
     transfer_cfg = dict(protocol_cfg)
-    transfer_cfg.setdefault("train", {"dataset": "mv2026", "split": "train"})
+    transfer_cfg["train"] = {**dict(transfer_cfg.get("train") or {}), "dataset": "mv2026", "split": "train"}
     transfer_cfg["eval"] = [
         phase
         for phase in _eval_phase_configs(datasets, protocol_cfg)
@@ -216,6 +226,7 @@ def _apply_schedule_override(service: MemoryService, protocol_cfg: dict) -> None
             }
         )
         service.consolidator.config = service.config
+        service.store.config = service.config
 
 
 def _train_phase_config(datasets: dict, protocol_cfg: dict) -> dict:
@@ -226,6 +237,7 @@ def _train_phase_config(datasets: dict, protocol_cfg: dict) -> dict:
     phase.setdefault("raw_root", dataset_cfg.get("raw_root", f"data/raw/{phase['dataset']}"))
     phase.setdefault("metadata", dataset_cfg.get("train_metadata", dataset_cfg.get("metadata")))
     phase.setdefault("image_root", dataset_cfg.get("image_root"))
+    phase.setdefault("allow_memory_retrieval", protocol_cfg.get("allow_memory_retrieval", True))
     return phase
 
 
@@ -240,6 +252,7 @@ def _eval_phase_configs(datasets: dict, protocol_cfg: dict) -> list[dict]:
             phase.setdefault("split", dataset_cfg.get("split"))
             phase.setdefault("metadata", dataset_cfg.get("metadata"))
             phase.setdefault("image_root", dataset_cfg.get("image_root"))
+            phase.setdefault("allow_memory_retrieval", protocol_cfg.get("allow_memory_retrieval", True))
             resolved.append(phase)
         return resolved
     resolved = []
@@ -253,6 +266,7 @@ def _eval_phase_configs(datasets: dict, protocol_cfg: dict) -> list[dict]:
                 "raw_root": dataset_cfg.get("raw_root"),
                 "metadata": dataset_cfg.get("metadata"),
                 "image_root": dataset_cfg.get("image_root"),
+                "allow_memory_retrieval": protocol_cfg.get("allow_memory_retrieval", True),
             }
         )
     return resolved
@@ -265,6 +279,7 @@ def _evaluate_phase(
     memory_service: MemoryService | None,
     update_memory: bool,
 ) -> dict:
+    allow_memory_retrieval = phase.get("allow_memory_retrieval", True)
     dataset = phase.get("dataset")
     if dataset == "mv2026":
         return evaluate_mv2026(
@@ -276,6 +291,7 @@ def _evaluate_phase(
             limit=phase.get("limit"),
             memory_service=memory_service,
             update_memory=update_memory,
+            allow_memory_retrieval=allow_memory_retrieval,
         )
     if dataset == "cosmos":
         return evaluate_cosmos(
@@ -287,6 +303,7 @@ def _evaluate_phase(
             llm_client=llm_client,
             memory_service=memory_service,
             update_memory=update_memory,
+            allow_memory_retrieval=allow_memory_retrieval,
         )
     raise ValueError(f"Unknown dataset in protocol phase: {dataset!r}")
 
@@ -298,11 +315,12 @@ def _evaluate_datasets(
     memory_service: MemoryService | None,
     update_memory: bool,
     results: dict,
+    allow_memory_retrieval: bool = True,
 ) -> None:
     mv_cfg = datasets.get("mv2026", {})
     cosmos_cfg = datasets.get("cosmos", {})
     if mv_cfg.get("enabled", True):
-        results["runs"]["mv2026"] = evaluate_mv2026(
+        results["runs"]["mv2026_{}".format(mv_cfg.get("split", "validation"))] = evaluate_mv2026(
             raw_root=mv_cfg.get("raw_root", "data/raw/mv2026"),
             output_dir=out / "mv2026",
             protocol="static",
@@ -310,9 +328,10 @@ def _evaluate_datasets(
             llm_client=llm_client,
             memory_service=memory_service,
             update_memory=update_memory,
+            allow_memory_retrieval=allow_memory_retrieval,
         )
     if cosmos_cfg.get("enabled", True):
-        results["runs"]["cosmos"] = evaluate_cosmos(
+        results["runs"]["cosmos_{}".format(cosmos_cfg.get("split", "test"))] = evaluate_cosmos(
             cosmos_metadata=cosmos_cfg.get("metadata", "data/raw/cosmos/test.jsonl"),
             image_root=cosmos_cfg.get("image_root", "data/raw/cosmos"),
             output_dir=out / "cosmos",
@@ -321,6 +340,22 @@ def _evaluate_datasets(
             llm_client=llm_client,
             memory_service=memory_service,
             update_memory=update_memory,
+            allow_memory_retrieval=allow_memory_retrieval,
+        )
+
+
+def _ensure_clean_memory_dir(memory_dir: Path, resume: bool) -> None:
+    if resume or not memory_dir.exists():
+        return
+    state_names = {
+        "short_term_memory.jsonl", "episodic_memory.jsonl", "failure_memory.jsonl",
+        "semantic_rules.jsonl", "consolidation_events.jsonl", "manifest.json",
+    }
+    contaminated = [path for path in memory_dir.rglob("*") if path.is_file() and (path.name in state_names or path.suffix == ".jsonl") and path.stat().st_size > 0]
+    if contaminated:
+        raise FileExistsError(
+            f"Protocol memory directory already contains state: {memory_dir}. "
+            "Use a clean output directory or set resume=true explicitly."
         )
 
 

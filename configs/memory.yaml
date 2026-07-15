@@ -35,12 +35,15 @@ consolidation:
   episodic:
     min_confidence: 0.85
     min_distinct_cases: 1
+    min_distinct_sources: 1
   failure:
     min_confidence: 0.70
     min_distinct_cases: 2
+    min_distinct_sources: 2
   semantic_rule:
     min_confidence: 0.75
     min_distinct_cases: 3
+    min_distinct_sources: 3
   max_conflict_ratio: 0.20
   under_review_conflict_ratio: 0.30
   deprecate_confidence_below: 0.45
@@ -48,7 +51,8 @@ consolidation:
 
 retrieval:
   top_k: 5
-  min_similarity: 0.05
+  min_semantic_similarity: 0.05
+  min_final_score: 0.05
   include_memory_types:
     - episodic
     - failure

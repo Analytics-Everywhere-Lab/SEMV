@@ -78,3 +78,20 @@ def test_cli_apply_is_idempotent(tmp_path):
     assert second["merged_records"] == []
     assert len(store.load_long_term()) == 1
     assert second["counts_after"]["long_term"] == first["counts_after"]["long_term"]
+
+
+def test_cli_dry_run_on_missing_directory_creates_nothing(tmp_path):
+    missing = tmp_path / "never-created"
+    output = _run_cli(missing, "--dry-run")
+    assert output["dry_run"] is True
+    assert output["consolidation_mode"] == "deterministic-only"
+    assert not missing.exists()
+
+
+def test_cli_snapshot_requires_apply(tmp_path):
+    import pytest
+
+    missing = tmp_path / "never-created"
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_cli(missing, "--snapshot")
+    assert not missing.exists()

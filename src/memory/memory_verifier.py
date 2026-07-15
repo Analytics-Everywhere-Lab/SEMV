@@ -11,7 +11,8 @@ from src.memory.memory_similarity import (
     normalize_text,
 )
 from src.memory.memory_store import MemoryStore
-from src.schemas.memory_schema import MemoryRecord, MemoryUpdateCandidate
+from src.schemas.memory_schema import ConsolidationEvent, MemoryRecord, MemoryUpdateCandidate
+from src.utils.hashing import stable_hash_text
 from src.utils.llm_client import LLMClient
 
 
@@ -52,11 +53,34 @@ class MemoryVerifier:
         valid_evidence_ids: set[str] | None = None,
         valid_argument_ids: set[str] | None = None,
     ) -> MemoryUpdateCandidate:
+        result = self._verify_candidate(candidate, valid_evidence_ids, valid_argument_ids)
+        if not self.store.read_only:
+            self.store.append_consolidation_event(ConsolidationEvent(
+                event_id=f"evt_{stable_hash_text('candidate_verification' + result.candidate_id + result.verification_status)}",
+                event_type="candidate_verification",
+                stm_ids=[f"stm_{result.candidate_id}"],
+                details={
+                    "candidate_id": result.candidate_id,
+                    "verification_status": result.verification_status,
+                    "verified": result.verified,
+                    "reason": result.rejected_reason,
+                },
+            ))
+        return result
+
+    def _verify_candidate(
+        self,
+        candidate: MemoryUpdateCandidate,
+        valid_evidence_ids: set[str] | None = None,
+        valid_argument_ids: set[str] | None = None,
+    ) -> MemoryUpdateCandidate:
         candidate = self._ensure_keys(candidate)
 
         # Stage 0: candidates derived from validation/test cases never enter memory.
         if candidate.dataset_split and candidate.dataset_split.lower() in NON_TRAINING_SPLITS:
             return self._rejected(candidate, "non_training_split")
+
+        existing = self.store.load_long_term(statuses=["active"])
 
         # Stage 1: schema and grounding validation.
         if candidate.verification_status == "under_review" and candidate.rejected_reason:
@@ -65,6 +89,11 @@ class MemoryVerifier:
             return self._under_review(candidate, candidate.rejected_reason)
         if self.config.verification.require_grounding:
             if not candidate.grounding_evidence_ids and not candidate.grounding_argument_ids:
+                conflict = self._find_contradiction(candidate, existing)
+                if conflict is not None:
+                    return self._under_review(
+                        self._as_conflict(candidate, conflict), "ungrounded_contradiction"
+                    )
                 return self._rejected(candidate, "missing_grounding")
             if valid_evidence_ids is not None:
                 invented = [
@@ -83,8 +112,6 @@ class MemoryVerifier:
         if candidate.confidence < self.config.verification.min_confidence:
             return self._rejected(candidate, "confidence_below_threshold")
 
-        existing = self.store.load_long_term(statuses=["active"])
-
         # Stage 3: exact/canonical duplicate check. A duplicate from a case (or
         # source fingerprint) that already supports the record adds nothing; an
         # equivalent observation from a NEW case is kept so consolidation can
@@ -102,14 +129,16 @@ class MemoryVerifier:
                 if known_case or known_fingerprint:
                     return self._rejected(candidate, "duplicate_from_same_source")
 
-        # Stage 4: semantic contradiction check against stronger active memory.
+        # Stage 4: a grounded contradiction is evidence about the existing rule,
+        # not a competing golden rule. Trustworthiness is still verified fail-closed.
         conflict = self._find_contradiction(candidate, existing)
         if conflict is not None:
-            if self.config.verification.reject_on_conflict and self._is_stronger(conflict, candidate):
-                return self._rejected(
-                    candidate, f"contradicts_active_memory:{conflict.memory_id}"
-                )
-            return self._under_review(candidate, f"contradicts_active_memory:{conflict.memory_id}")
+            checked = self._llm_verify(self._as_conflict(candidate, conflict))
+            if checked.verification_status == "verified":
+                return checked
+            return self._under_review(
+                checked, checked.rejected_reason or f"contradicts_active_memory:{conflict.memory_id}"
+            )
 
         # Stage 5a: deterministic overgeneralization screen for single-case rules.
         if candidate.memory_type == "semantic_rule" and self._overgeneralizes(candidate):
@@ -131,7 +160,8 @@ class MemoryVerifier:
             f"Candidate: {candidate.text}\n"
             f"Trigger: {candidate.trigger_pattern or ''}\n"
             f"Recommended action: {candidate.recommended_action or ''}\n"
-            f"Rationale: {candidate.rationale or ''}"
+            f"Rationale: {candidate.rationale or ""}\n"
+            f"Grounding summaries: {candidate.grounding}"
         )
         try:
             data = self.llm_client.generate_json(prompt)
@@ -179,6 +209,14 @@ class MemoryVerifier:
             if self.similarity.relation(candidate_item, record_item) == "contradicts":
                 return by_id.get(record_item.get("memory_id", ""))
         return None
+
+    @staticmethod
+    def _as_conflict(candidate: MemoryUpdateCandidate, record: MemoryRecord) -> MemoryUpdateCandidate:
+        return candidate.model_copy(update={
+            "semantic_relation": "contradicts",
+            "related_memory_id": record.memory_id,
+            "metadata": {**candidate.metadata, "conflict_target_memory_id": record.memory_id},
+        })
 
     @staticmethod
     def _is_stronger(record: MemoryRecord, candidate: MemoryUpdateCandidate) -> bool:
