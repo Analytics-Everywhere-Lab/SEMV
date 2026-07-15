@@ -27,6 +27,8 @@ def evaluate_cosmos(
     mode: str = "closed_world",
     split: str | None = "test",
     llm_client=None,
+    memory_service=None,
+    update_memory: bool = False,
 ) -> dict:
     metadata_path = _resolve(cosmos_metadata)
     if not metadata_path.exists():
@@ -44,6 +46,9 @@ def evaluate_cosmos(
     y_true = []
     y_prob = []
 
+    if update_memory and memory_service is not None and memory_service.frozen:
+        raise ValueError("update_memory=True is incompatible with a frozen memory service.")
+
     for row in rows:
         bundle = build_cosmos_case(row, split=split, image_root=image_base)
         bundle = bundle.model_copy(
@@ -52,12 +57,18 @@ def evaluate_cosmos(
                     update={
                         "allow_web_search": False,
                         "allow_reverse_search": False,
-                        "allow_memory_update": False,
+                        "allow_memory_update": update_memory,
                     }
                 )
             }
         )
-        report = run_case_bundle(bundle, mode="test", llm_client=llm_client)
+        run_mode = "bootstrap_memory" if update_memory else "test"
+        report = run_case_bundle(
+            bundle,
+            mode=run_mode,
+            llm_client=llm_client,
+            memory_service=memory_service,
+        )
         prediction = prediction_from_report(report, "cosmos", "out_of_context_detection")
         predictions.append(prediction.model_dump(mode="json"))
         gold = GoldRecord(
@@ -108,7 +119,11 @@ def evaluate_cosmos(
         "risk_coverage": risk_coverage(y_true, y_prob),
         "confusion_matrix": confusion_matrix(binary_gold, binary_pred),
     }
-    mem = memory_metrics(predictions, per_case)
+    mem = memory_metrics(
+        predictions,
+        per_case,
+        store=memory_service.store if memory_service is not None else None,
+    )
     out = _resolve(output_dir)
     write_records(out, predictions, gold_records, per_case, aggregate, calibration or {}, mem)
     return aggregate

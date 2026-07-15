@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.schemas.argument_schema import Argument
 from src.schemas.contestation_schema import HumanReviewBatch, RevisionPlan
 from src.schemas.evidence_schema import EvidenceGraph, EvidenceItem
-from src.schemas.memory_schema import MemoryRecord, MemoryUpdateCandidate
+from src.schemas.memory_schema import MemoryRecord, MemoryUpdateCandidate, ShortTermMemoryRecord
 
 
 class SubClaimReport(BaseModel):
@@ -48,11 +48,18 @@ class VerificationReport(BaseModel):
     subclaim_reports: list[SubClaimReport] = Field(default_factory=list)
     evidence: list[EvidenceItem] = Field(default_factory=list)
     evidence_graph: EvidenceGraph = Field(default_factory=EvidenceGraph)
+    # memory_retrieved = everything retrieval returned; memory_used = only the
+    # records actually cited by the planner or an argument via used_memory_ids.
+    memory_retrieved: list[MemoryRecord] = Field(default_factory=list)
     memory_used: list[MemoryRecord] = Field(default_factory=list)
     uncertainty_flags: list[str] = Field(default_factory=list)
     reflection_logs: list[ReflectionLog] = Field(default_factory=list)
     memory_update_candidates: list[MemoryUpdateCandidate] = Field(default_factory=list)
+    # memory_updates_applied = long-term records actually changed by
+    # consolidation; staged short-term records live in memory_updates_staged.
     memory_updates_applied: list[MemoryRecord] = Field(default_factory=list)
+    memory_updates_staged: list[ShortTermMemoryRecord] = Field(default_factory=list)
+    memory_consolidation_events: list[dict[str, Any]] = Field(default_factory=list)
     human_review_applied: bool = False
     human_review_batch: HumanReviewBatch | None = None
     revision_plan: RevisionPlan | None = None

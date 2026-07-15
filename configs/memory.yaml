@@ -1,10 +1,56 @@
-retrieval:
-  top_k: 5
-  min_similarity: 0.05
+paths:
+  memory_dir: data/memory
+  short_term_file: short_term_memory.jsonl
+  episodic_file: episodic_memory.jsonl
+  failure_file: failure_memory.jsonl
+  semantic_file: semantic_rules.jsonl
+  event_log_file: consolidation_events.jsonl
+  usage_log_file: memory_usage_events.jsonl
+  archive_dir: data/memory/archive
+  snapshot_dir: data/memory/snapshots
+
+short_term:
+  max_records: 5000
+  ttl_days: 30
+  retrieve_during_bootstrap: false
+  archive_expired: true
 
 verification:
   min_confidence: 0.60
   reject_on_conflict: true
+  fail_policy: under_review
+  require_grounding: true
+
+similarity:
+  backend: hybrid
+  duplicate_similarity: 0.85
+  contradiction_similarity: 0.75
+  lexical_shortlist_k: 20
+  use_llm_relation_check: true
+  optional_embedding_backend: null
 
 consolidation:
-  duplicate_similarity: 0.85
+  every_n_cases: 25
+  min_distinct_sources: 2
+  episodic:
+    min_confidence: 0.85
+    min_distinct_cases: 1
+  failure:
+    min_confidence: 0.70
+    min_distinct_cases: 2
+  semantic_rule:
+    min_confidence: 0.75
+    min_distinct_cases: 3
+  max_conflict_ratio: 0.20
+  under_review_conflict_ratio: 0.30
+  deprecate_confidence_below: 0.45
+  generalize_repeated_episodes: true
+
+retrieval:
+  top_k: 5
+  min_similarity: 0.05
+  include_memory_types:
+    - episodic
+    - failure
+    - semantic_rule
+  active_only: true

@@ -310,6 +310,7 @@ def execute_adaptive_revision(
     research_plans: dict[str, ResearchPlan],
     llm_client: LLMClient,
     exclude_rejected_arguments: bool = True,
+    memory_retriever: MemoryRetriever | None = None,
 ) -> tuple[VerificationReport, list[QBAFGraph], list[Argument], list[EvidenceItem], EvidenceGraph]:
     from src.main import _research_claims_parallel, _merge_dedup_evidence
 
@@ -338,6 +339,7 @@ def execute_adaptive_revision(
             memory_by_claim=memory_by_claim,
             reviewed_arguments=reviewed_arguments,
             research_plans=research_plans,
+            memory_retriever=memory_retriever,
             revision_plan=revision_plan,
             llm_client=llm_client,
             exclude_rejected_arguments=exclude_rejected_arguments,
@@ -549,6 +551,7 @@ def _rerun_from_claim_decomposition(
     revision_plan: RevisionPlan,
     llm_client: LLMClient,
     exclude_rejected_arguments: bool,
+    memory_retriever: MemoryRetriever | None = None,
 ) -> tuple[VerificationReport, list[QBAFGraph], list[Argument], list[EvidenceItem], EvidenceGraph]:
     from src.main import _merge_dedup_evidence, _research_claims_parallel
 
@@ -566,7 +569,7 @@ def _rerun_from_claim_decomposition(
         or claim.statement != old_claims_by_id[claim.claim_id].statement
     ]
 
-    memory_retriever = MemoryRetriever()
+    memory_retriever = memory_retriever or MemoryRetriever()
     new_memory_by_claim = dict(memory_by_claim)
     for claim in changed_or_new_claims:
         if claim.claim_id in new_memory_by_claim:

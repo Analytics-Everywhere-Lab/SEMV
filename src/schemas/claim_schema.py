@@ -34,3 +34,5 @@ class ResearchPlan(BaseModel):
     search_queries: list[str] = Field(default_factory=list)
     preferred_sources: list[str] = Field(default_factory=list)
     uncertainty_checks: list[str] = Field(default_factory=list)
+    used_memory_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)

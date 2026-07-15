@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from src.evaluation.cosmos_evaluator import evaluate_cosmos
 from src.evaluation.mv2026_evaluator import evaluate_mv2026
+from src.memory.memory_service import MemoryService
 from src.memory.seed_memory import seed_semantic_rules
 from src.utils.io import project_root, read_yaml, write_json
+
+
+logger = logging.getLogger("run_case")
 
 ABLATION_VARIANTS = {
     "A0": {"name": "No memory, no A-QBAF", "use_memory": False, "use_qbaf": False},
@@ -31,38 +36,292 @@ def run_protocol(
     config = read_yaml(config_path)
     evaluation = config.get("evaluation", {})
     datasets = evaluation.get("datasets", {})
-    selected = protocol or evaluation.get("protocol", {}).get("name", "static")
+    protocol_cfg = evaluation.get("protocol", {})
+    selected = protocol or protocol_cfg.get("name", "static")
     out = _resolve(output_dir or "data/outputs/evaluation/joint_mv_cosmos")
     out.mkdir(parents=True, exist_ok=True)
-    seed_semantic_rules()
 
-    results = {"protocol": selected, "runs": {}}
-    if selected in {"static", "prequential", "train_memory_freeze_test", "mv2026_to_cosmos_transfer"}:
-        mv_cfg = datasets.get("mv2026", {})
-        cosmos_cfg = datasets.get("cosmos", {})
-        if mv_cfg.get("enabled", True):
-            results["runs"]["mv2026"] = evaluate_mv2026(
-                raw_root=mv_cfg.get("raw_root", "data/raw/mv2026"),
-                output_dir=out / "mv2026",
-                protocol=selected,
-                split=mv_cfg.get("split", "validation"),
-                llm_client=llm_client,
-            )
-        if cosmos_cfg.get("enabled", True):
-            results["runs"]["cosmos"] = evaluate_cosmos(
-                cosmos_metadata=cosmos_cfg.get("metadata", "data/raw/cosmos/test.jsonl"),
-                image_root=cosmos_cfg.get("image_root", "data/raw/cosmos/images"),
-                output_dir=out / "cosmos",
-                mode=cosmos_cfg.get("mode", "closed_world"),
-                split=cosmos_cfg.get("split", "test"),
-                llm_client=llm_client,
-            )
+    memory_config_path = evaluation.get("memory_config", "configs/memory.yaml")
+
+    if selected == "static":
+        results = _run_static(datasets, protocol_cfg, out, llm_client, memory_config_path)
+    elif selected == "prequential":
+        results = _run_prequential(datasets, protocol_cfg, out, llm_client, memory_config_path)
+    elif selected == "train_memory_freeze_test":
+        results = _run_train_memory_freeze_test(
+            datasets, protocol_cfg, out, llm_client, memory_config_path
+        )
+    elif selected == "mv2026_to_cosmos_transfer":
+        results = _run_transfer(datasets, protocol_cfg, out, llm_client, memory_config_path)
     elif selected == "ablations":
-        results["ablations"] = ABLATION_VARIANTS
+        results = {"protocol": selected, "ablations": ABLATION_VARIANTS}
     else:
         raise ValueError(f"Unsupported protocol: {selected}")
+
     write_json(out / "protocol_results.json", results)
     return results
+
+
+# ------------------------------------------------------------------ protocols
+
+
+def _run_static(datasets, protocol_cfg, out: Path, llm_client, memory_config_path) -> dict:
+    """Frozen memory, retrieval optional, no updates."""
+    service = MemoryService.from_config_path(
+        memory_config_path,
+        llm_client=llm_client,
+        frozen=True,
+        usage_log_path=out / "memory_usage_events.jsonl",
+    )
+    results = {"protocol": "static", "runs": {}}
+    _evaluate_datasets(
+        datasets,
+        out,
+        llm_client,
+        memory_service=service if protocol_cfg.get("allow_memory_retrieval", True) else None,
+        update_memory=False,
+        results=results,
+    )
+    return results
+
+
+def _run_prequential(datasets, protocol_cfg, out: Path, llm_client, memory_config_path) -> dict:
+    """For each training case: predict with memory from previous cases, evaluate,
+    reveal gold, stage reflection, and consolidate on schedule. The current case
+    never learns from its own gold before prediction (bootstrap_memory mode
+    reflects only after the report exists)."""
+    memory_dir = out / "memory"
+    service = MemoryService.from_config_path(
+        memory_config_path,
+        memory_dir=memory_dir,
+        llm_client=llm_client,
+    )
+    _apply_schedule_override(service, protocol_cfg)
+    seed_semantic_rules(store=service.store)
+    results = {"protocol": "prequential", "runs": {}, "memory_dir": str(memory_dir)}
+    train_cfg = _train_phase_config(datasets, protocol_cfg)
+    results["runs"]["train"] = _evaluate_phase(
+        train_cfg,
+        out / "prequential",
+        llm_client,
+        memory_service=service,
+        update_memory=True,
+    )
+    final = service.consolidate()
+    results["final_consolidation"] = {
+        "promoted": final.promoted,
+        "merged": final.merged,
+        "conflicted": final.conflicted,
+    }
+    results["memory_counts"] = service.store.counts()
+    return results
+
+
+def _run_train_memory_freeze_test(
+    datasets, protocol_cfg, out: Path, llm_client, memory_config_path
+) -> dict:
+    """1) isolated run-specific memory dir, 2) seed rules, 3) deterministic
+    training with retrieval+updates, 4) consolidate every N cases, 5) force final
+    consolidation, 6) frozen snapshot with manifest and state hash, 7) frozen
+    validation/test, 8) assert the state hash is unchanged."""
+    memory_dir = out / "memory"
+    train_service = MemoryService.from_config_path(
+        memory_config_path,
+        memory_dir=memory_dir,
+        llm_client=llm_client,
+    )
+    _apply_schedule_override(train_service, protocol_cfg)
+    seed_semantic_rules(store=train_service.store)
+
+    results: dict = {"protocol": "train_memory_freeze_test", "runs": {}, "memory_dir": str(memory_dir)}
+
+    train_cfg = _train_phase_config(datasets, protocol_cfg)
+    results["runs"]["train"] = _evaluate_phase(
+        train_cfg,
+        out / "train",
+        llm_client,
+        memory_service=train_service,
+        update_memory=True,
+    )
+
+    final = train_service.consolidate()
+    results["final_consolidation"] = {
+        "promoted": final.promoted,
+        "merged": final.merged,
+        "conflicted": final.conflicted,
+        "under_review": final.under_review,
+    }
+
+    snapshot_path = train_service.snapshot("frozen")
+    frozen_hash = train_service.state_hash()
+    results["snapshot_path"] = str(snapshot_path)
+    results["state_hash"] = frozen_hash
+
+    frozen_service = MemoryService.from_config_path(
+        memory_config_path,
+        memory_dir=snapshot_path,
+        llm_client=llm_client,
+        frozen=True,
+        usage_log_path=out / "eval" / "memory_usage_events.jsonl",
+    )
+
+    for phase in _eval_phase_configs(datasets, protocol_cfg):
+        phase_out = out / "eval" / f"{phase['dataset']}_{phase.get('split') or 'default'}"
+        results["runs"][f"eval_{phase['dataset']}"] = _evaluate_phase(
+            phase,
+            phase_out,
+            llm_client,
+            memory_service=frozen_service,
+            update_memory=False,
+        )
+
+    post_hash = frozen_service.state_hash()
+    results["state_hash_after_eval"] = post_hash
+    if post_hash != frozen_hash:
+        raise RuntimeError(
+            "Frozen memory snapshot changed during validation/test: "
+            f"{frozen_hash} -> {post_hash}"
+        )
+    results["memory_state_unchanged"] = True
+    return results
+
+
+def _run_transfer(datasets, protocol_cfg, out: Path, llm_client, memory_config_path) -> dict:
+    """Build memory only from the configured MV2026 training split, freeze it,
+    and evaluate COSMOS without updates."""
+    transfer_cfg = dict(protocol_cfg)
+    transfer_cfg.setdefault("train", {"dataset": "mv2026", "split": "train"})
+    transfer_cfg["eval"] = [
+        phase
+        for phase in _eval_phase_configs(datasets, protocol_cfg)
+        if phase["dataset"] == "cosmos"
+    ] or [{"dataset": "cosmos", "split": datasets.get("cosmos", {}).get("split", "test")}]
+    result = _run_train_memory_freeze_test(datasets, transfer_cfg, out, llm_client,
+                                           memory_config_path)
+    result["protocol"] = "mv2026_to_cosmos_transfer"
+    return result
+
+
+# ------------------------------------------------------------------- helpers
+
+
+def _apply_schedule_override(service: MemoryService, protocol_cfg: dict) -> None:
+    every_n = protocol_cfg.get("consolidate_every_n_cases")
+    if every_n:
+        service.config = service.config.model_copy(
+            update={
+                "consolidation": service.config.consolidation.model_copy(
+                    update={"every_n_cases": int(every_n)}
+                )
+            }
+        )
+        service.consolidator.config = service.config
+
+
+def _train_phase_config(datasets: dict, protocol_cfg: dict) -> dict:
+    phase = dict(protocol_cfg.get("train") or {})
+    phase.setdefault("dataset", "mv2026")
+    dataset_cfg = datasets.get(phase["dataset"], {})
+    phase.setdefault("split", dataset_cfg.get("train_split", "train"))
+    phase.setdefault("raw_root", dataset_cfg.get("raw_root", f"data/raw/{phase['dataset']}"))
+    phase.setdefault("metadata", dataset_cfg.get("train_metadata", dataset_cfg.get("metadata")))
+    phase.setdefault("image_root", dataset_cfg.get("image_root"))
+    return phase
+
+
+def _eval_phase_configs(datasets: dict, protocol_cfg: dict) -> list[dict]:
+    phases = protocol_cfg.get("eval")
+    if phases:
+        resolved = []
+        for phase in phases:
+            phase = dict(phase)
+            dataset_cfg = datasets.get(phase.get("dataset", ""), {})
+            phase.setdefault("raw_root", dataset_cfg.get("raw_root"))
+            phase.setdefault("split", dataset_cfg.get("split"))
+            phase.setdefault("metadata", dataset_cfg.get("metadata"))
+            phase.setdefault("image_root", dataset_cfg.get("image_root"))
+            resolved.append(phase)
+        return resolved
+    resolved = []
+    for name, dataset_cfg in datasets.items():
+        if not dataset_cfg.get("enabled", True):
+            continue
+        resolved.append(
+            {
+                "dataset": name,
+                "split": dataset_cfg.get("split"),
+                "raw_root": dataset_cfg.get("raw_root"),
+                "metadata": dataset_cfg.get("metadata"),
+                "image_root": dataset_cfg.get("image_root"),
+            }
+        )
+    return resolved
+
+
+def _evaluate_phase(
+    phase: dict,
+    output_dir: Path,
+    llm_client,
+    memory_service: MemoryService | None,
+    update_memory: bool,
+) -> dict:
+    dataset = phase.get("dataset")
+    if dataset == "mv2026":
+        return evaluate_mv2026(
+            raw_root=phase.get("raw_root") or "data/raw/mv2026",
+            output_dir=output_dir,
+            protocol="train" if update_memory else "frozen_eval",
+            split=phase.get("split"),
+            llm_client=llm_client,
+            limit=phase.get("limit"),
+            memory_service=memory_service,
+            update_memory=update_memory,
+        )
+    if dataset == "cosmos":
+        return evaluate_cosmos(
+            cosmos_metadata=phase.get("metadata") or "data/raw/cosmos/test.jsonl",
+            image_root=phase.get("image_root") or "data/raw/cosmos/images",
+            output_dir=output_dir,
+            mode=phase.get("mode", "closed_world"),
+            split=phase.get("split"),
+            llm_client=llm_client,
+            memory_service=memory_service,
+            update_memory=update_memory,
+        )
+    raise ValueError(f"Unknown dataset in protocol phase: {dataset!r}")
+
+
+def _evaluate_datasets(
+    datasets: dict,
+    out: Path,
+    llm_client,
+    memory_service: MemoryService | None,
+    update_memory: bool,
+    results: dict,
+) -> None:
+    mv_cfg = datasets.get("mv2026", {})
+    cosmos_cfg = datasets.get("cosmos", {})
+    if mv_cfg.get("enabled", True):
+        results["runs"]["mv2026"] = evaluate_mv2026(
+            raw_root=mv_cfg.get("raw_root", "data/raw/mv2026"),
+            output_dir=out / "mv2026",
+            protocol="static",
+            split=mv_cfg.get("split", "validation"),
+            llm_client=llm_client,
+            memory_service=memory_service,
+            update_memory=update_memory,
+        )
+    if cosmos_cfg.get("enabled", True):
+        results["runs"]["cosmos"] = evaluate_cosmos(
+            cosmos_metadata=cosmos_cfg.get("metadata", "data/raw/cosmos/test.jsonl"),
+            image_root=cosmos_cfg.get("image_root", "data/raw/cosmos"),
+            output_dir=out / "cosmos",
+            mode=cosmos_cfg.get("mode", "closed_world"),
+            split=cosmos_cfg.get("split", "test"),
+            llm_client=llm_client,
+            memory_service=memory_service,
+            update_memory=update_memory,
+        )
 
 
 def _resolve(path: str | Path) -> Path:

@@ -19,7 +19,7 @@ from src.argumentation.clash_resolver import ClashResolver
 from src.evidence.evidence_graph import EvidenceGraphBuilder
 from src.evidence.evidence_normalizer import EvidenceNormalizer
 from src.ingestion.gold_leakage_guard import assert_no_gold_leakage
-from src.memory.memory_retriever import MemoryRetriever
+from src.memory.memory_service import MemoryService
 from src.planning.claim_decomposer import ClaimDecomposer
 from src.planning.research_planner import ResearchPlanner
 from src.processing.media_loader import RawMediaProcessor
@@ -68,6 +68,7 @@ def run_case_bundle(
     enable_adaptive_revision: bool | None = None,
     save_case_trace: bool = True,
     exclude_rejected_arguments: bool = True,
+    memory_service: MemoryService | None = None,
 ) -> VerificationReport:
     if mode not in {"inference_only", "self_evolving", "test", "bootstrap_memory"}:
         raise ValueError("mode must be inference_only, self_evolving, test, or bootstrap_memory")
@@ -95,22 +96,21 @@ def run_case_bundle(
             evidence=raw_evidence,
         )
 
-    memory_retriever = MemoryRetriever()
+    shared_memory_service = memory_service or MemoryService(llm_client=shared_llm_client)
     if bundle.run_config.allow_memory_retrieval:
-        memory_by_claim = memory_retriever.retrieve_for_claims(
+        memory_by_claim = shared_memory_service.retrieve_for_claims(
             bundle=bundle,
             claims=bundle.claims or [],
             evidence=raw_evidence,
             source_clusters=bundle.source_clusters,
-            top_k=5,
+            include_short_term=mode in {"bootstrap_memory", "self_evolving"},
         )
         if not memory_by_claim:
             memory_by_claim = {
-                claim.claim_id: memory_retriever.retrieve(
+                claim.claim_id: shared_memory_service.retrieve(
                     case=legacy_case,
                     claim=claim,
                     evidence=raw_evidence,
-                    top_k=5,
                 )
                 for claim in claims
             }
@@ -181,7 +181,16 @@ def run_case_bundle(
         subclaim_reports,
         bundle=bundle,
     )
-    memory_used = _flatten_memory(memory_by_claim.values())
+    memory_retrieved = _flatten_memory(memory_by_claim.values())
+    used_memory_ids = _collect_used_memory_ids(research_plans, all_arguments)
+    memory_used = [record for record in memory_retrieved if record.memory_id in used_memory_ids]
+    _log_memory_usage(
+        service=shared_memory_service,
+        bundle=bundle,
+        memory_by_claim=memory_by_claim,
+        research_plans=research_plans,
+        arguments=all_arguments,
+    )
     logger.info("[7/8] Uncertainty escalation")
     logger.info("[8/8] Report rendering")
     report = ReportGenerator(llm_client=shared_llm_client).generate(
@@ -196,12 +205,14 @@ def run_case_bundle(
     report = _attach_escalation(report, subclaim_reports, all_arguments, normalized_evidence)
     report = report.model_copy(
         update={
+            "memory_retrieved": memory_retrieved,
             "metadata": {
                 **report.metadata,
                 "dataset": bundle.dataset.model_dump(mode="json"),
                 "task": bundle.task.model_dump(mode="json"),
                 "input": bundle.input.model_dump(mode="json"),
                 "gold_visibility": bundle.gold.gold_visibility,
+                "used_memory_ids": sorted(used_memory_ids),
             }
         }
     )
@@ -258,6 +269,7 @@ def run_case_bundle(
                 research_plans=research_plans,
                 llm_client=shared_llm_client,
                 exclude_rejected_arguments=exclude_rejected_arguments,
+                memory_retriever=shared_memory_service.retriever,
             )
         contestation_diff = _contestation_diff(
             original_report=report_before_contestation,
@@ -296,7 +308,16 @@ def run_case_bundle(
     if mode in {"self_evolving", "bootstrap_memory"} and (
         bundle.gold.gold_final_label or bundle.gold.gold_report_available
     ):
-        reflection, candidates = ReflectionAgent(llm_client=shared_llm_client).reflect(
+        # Gold is only revealed here, after the report (prediction) exists.
+        # Only training/bootstrap runs may stage short-term memory; a frozen
+        # memory service (validation/test snapshots) never updates.
+        allow_update = (
+            bundle.run_config.allow_memory_update and not shared_memory_service.frozen
+        )
+        reflection, candidates = ReflectionAgent(
+            llm_client=shared_llm_client,
+            memory_service=shared_memory_service,
+        ).reflect(
             report=report,
             ground_truth_label=bundle.gold.gold_final_label,
             human_feedback=(
@@ -310,7 +331,7 @@ def run_case_bundle(
                 if review_batch is not None
                 else None
             ),
-            update_memory=bundle.run_config.allow_memory_update,
+            update_memory=allow_update,
         )
         report.reflection_logs = [reflection]
         report.memory_update_candidates = candidates
@@ -976,6 +997,7 @@ def _save_case_outputs(
         write_json(output_dir / "contestation_diff.json", contestation_diff)
     write_json(output_dir / "reflection_candidates.json", report.memory_update_candidates)
     write_json(output_dir / "verified_memory_updates.json", report.memory_updates_applied)
+    write_json(output_dir / "staged_memory_updates.json", report.memory_updates_staged)
     (output_dir / "run_log.txt").write_text(
         "gold_read_before_prediction=false\n"
         f"final_status={report.final_status}\n"
@@ -1007,6 +1029,69 @@ def _flatten_memory(groups) -> list[MemoryRecord]:
         for item in group:
             flattened[item.memory_id] = item
     return list(flattened.values())
+
+
+def _collect_used_memory_ids(
+    research_plans: dict[str, ResearchPlan],
+    arguments: list[Argument],
+) -> set[str]:
+    """Only memory ids explicitly cited by the planner or an argument count as used."""
+    used: set[str] = set()
+    for plan in research_plans.values():
+        used.update(plan.used_memory_ids)
+    for argument in arguments:
+        used.update(argument.metadata.get("used_memory_ids", []) or [])
+    return used
+
+
+def _log_memory_usage(
+    service: MemoryService,
+    bundle: CaseBundle,
+    memory_by_claim: dict[str, list[MemoryRecord]],
+    research_plans: dict[str, ResearchPlan],
+    arguments: list[Argument],
+) -> None:
+    dataset_name = bundle.dataset.dataset_name
+    dataset_split = bundle.dataset.dataset_split
+    try:
+        seen: set[tuple[str, str, str]] = set()
+        for claim_id, records in memory_by_claim.items():
+            for record in records:
+                key = (record.memory_id, "retrieved", claim_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                service.log_usage(
+                    case_id=bundle.case_id,
+                    memory_id=record.memory_id,
+                    stage="retrieved",
+                    claim_id=claim_id,
+                    dataset_name=dataset_name,
+                    dataset_split=dataset_split,
+                )
+        for claim_id, plan in research_plans.items():
+            for memory_id in plan.used_memory_ids:
+                service.log_usage(
+                    case_id=bundle.case_id,
+                    memory_id=memory_id,
+                    stage="planner_cited",
+                    claim_id=claim_id,
+                    dataset_name=dataset_name,
+                    dataset_split=dataset_split,
+                )
+        for argument in arguments:
+            for memory_id in argument.metadata.get("used_memory_ids", []) or []:
+                service.log_usage(
+                    case_id=bundle.case_id,
+                    memory_id=memory_id,
+                    stage="argument_cited",
+                    claim_id=argument.claim_id,
+                    argument_id=argument.argument_id,
+                    dataset_name=dataset_name,
+                    dataset_split=dataset_split,
+                )
+    except Exception:
+        logger.warning("Memory usage logging failed for case %s", bundle.case_id, exc_info=True)
 
 
 def _parse_bool(value: str | bool) -> bool:

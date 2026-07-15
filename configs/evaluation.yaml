@@ -13,10 +13,12 @@ evaluation:
       enabled: true
       raw_root: "data/raw/cosmos"
       metadata: "data/raw/cosmos/test.jsonl"
-      image_root: "data/raw/cosmos/images"
+      image_root: "data/raw/cosmos"
       canonical_root: "data/canonical/cosmos"
       split: "test"
       mode: "closed_world"
+
+  memory_config: "configs/memory.yaml"
 
   protocol:
     name: "train_memory_freeze_test"
@@ -24,6 +26,21 @@ evaluation:
     allow_memory_update_train: true
     allow_memory_update_test: false
     gold_reading_stage: "after_prediction_only"
+    # Consolidation cadence override for the training phase (defaults to
+    # consolidation.every_n_cases from configs/memory.yaml when null).
+    consolidate_every_n_cases: null
+    # Training/bootstrap phase (memory retrieval + updates enabled).
+    train:
+      dataset: "mv2026"
+      split: "train"
+      raw_root: "data/raw/mv2026/training"
+      limit: null
+    # Frozen evaluation phases (retrieval from the snapshot, updates disabled).
+    eval:
+      - dataset: "mv2026"
+        split: "validation"
+      - dataset: "cosmos"
+        split: "test"
 
   mv2026_metrics:
     final_label: true

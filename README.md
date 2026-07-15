@@ -163,7 +163,8 @@ The current codebase already contains the main contestability hooks:
 ```text
 configs/                  Runtime, scoring, memory, tool, and evaluation configs
 data/cases/               Small local example cases
-data/memory/              Episodic, semantic, and failure-memory stores
+data/memory/              Short-term staging plus episodic/semantic/failure LTM stores,
+                          event logs, archive, and frozen snapshots
 data/evidence_cache/      Cached/sample evidence records
 scripts/                  CLI entry points for runs, conversion, and evaluation
 src/aggregation/          Final decision aggregation
@@ -171,7 +172,8 @@ src/argumentation/        Argument generation, verification, scoring, clash hand
 src/evaluation/           MV2026/COSMOS metrics and protocol runner
 src/evidence/             Evidence normalization, provenance, and graph building
 src/ingestion/            Dataset adapters and canonical bundle writer
-src/memory/               Memory retrieval, verification, consolidation, seeding
+src/memory/               Memory config, store, similarity, retrieval, verification,
+                          consolidation, shared service, seeding
 src/planning/             Claim decomposition and research planning
 src/processing/           Media loading, metadata, OCR, ASR, VLM, forensics, keyframes
 src/qbaf/                 A-QBAF graph construction, propagation, decision mapping
@@ -729,30 +731,118 @@ Brier score.
 
 ## Memory and Self-Evolution
 
-Memory stores are JSONL files under `data/memory/`:
+SEMV implements a genuine short-term → long-term memory lifecycle:
 
 ```text
-episodic_memory.jsonl
-semantic_rules.jsonl
-failure_memory.jsonl
+Current-case working context (evidence, arguments, QBAF state, contestation)
+    ↓ case reflection after prediction (gold revealed only post-prediction)
+Grounded memory candidates (episodic / failure / semantic)
+    ↓ fail-closed verification (grounding, confidence, duplicates,
+      contradiction, LLM safety check — LLM failure never auto-accepts)
+Verified short-term memory (STM, persistent staging)
+    ↓ periodic multi-case clustering and consolidation
+Promotion / merge / conflict handling with Beta-style confidence recalibration
+    ↓
+Active long-term memory (LTM — only status="active" records are "golden memory")
+    ↓ retrieval for later cases; usage/feedback events inform later consolidation
+```
+
+Key properties:
+
+- **Working context is not memory.** Per-case evidence and arguments are
+  temporary; only reflection candidates that pass verification enter STM.
+- **Verified candidates are staged, never appended directly to LTM.**
+  Promotion happens only through `MemoryConsolidator.consolidate()`.
+- **Promotion thresholds** (configurable in `configs/memory.yaml`):
+  episodic — 1 grounded case with confidence ≥ 0.85; failure — ≥ 2 independent
+  cases and confidence ≥ 0.70; semantic rule — ≥ 3 independent cases and
+  confidence ≥ 0.75. Independence is counted over unique case IDs *and* unique
+  source fingerprints, so a rerun of the same case or near-duplicate dataset
+  rows never inflates `support_count`. A single human-reviewed case may become
+  a strong episodic record but never a universal semantic rule.
+- **Conflict and confidence handling.** Contradicting observations are never
+  merged: they increment `conflict_count`, add a conflict event, and push the
+  record to `under_review` when the conflict ratio exceeds the configured
+  threshold. Confidence is recalibrated as a Beta posterior kept in metadata
+  (`alpha += c`, `beta += 1 - c` for support; reversed for contradiction;
+  `confidence = alpha / (alpha + beta)`). Repeated strong contradictions plus
+  low confidence deprecate a record; age alone never does.
+- **Nothing is silently deleted.** Expired STM, deprecated LTM, and replaced
+  store files are archived under `data/memory/archive/`, and every lifecycle
+  transition is appended to `consolidation_events.jsonl`.
+- **Memory is guidance, not evidence.** Memory is passed to prompts as
+  `[memory_id] text`; planner and argument outputs must return
+  `used_memory_ids`, which are validated against the retrieved set. Only cited
+  memory counts as used (`memory_used` vs `memory_retrieved` in reports).
+  Every argument must still cite current-case `evidence_ids`; the argument
+  verifier rejects memory-only grounding.
+
+Memory file layout (paths configurable via `configs/memory.yaml`):
+
+```text
+data/memory/
+  short_term_memory.jsonl        # verified, staged observations (STM)
+  episodic_memory.jsonl          # long-term episodic records
+  failure_memory.jsonl           # long-term failure records
+  semantic_rules.jsonl           # long-term semantic rules (incl. origin="seed")
+  consolidation_events.jsonl     # lifecycle event log
+  memory_usage_events.jsonl      # retrieval/citation usage events
+  archive/                       # expired STM, deprecated LTM, timestamped backups
+  snapshots/<label>/             # frozen snapshots + manifest.json (state hash)
 ```
 
 Seed and consolidate memory with:
 
 ```bash
 python scripts/seed_memory.py
-python scripts/consolidate_memory.py
+
+# Dry run (default): reports what consolidation would do, mutates nothing.
+python scripts/consolidate_memory.py --config configs/memory.yaml --dry-run
+
+# Apply consolidation and write a frozen snapshot with manifest + state hash.
+python scripts/consolidate_memory.py --config configs/memory.yaml --apply --snapshot
 ```
 
-Memory retrieval and updates are controlled by `CaseBundle.run_config` and by
-the active evaluation protocol. Protocols can allow retrieval while freezing
-updates on held-out splits.
+The CLI prints structured JSON (counts before/after, STM candidates considered,
+promoted/merged/conflicted/under-review/deprecated/expired/unchanged records,
+support increments, snapshot path, state hash, errors) and is idempotent:
+running `--apply` twice without new STM observations produces no additional
+support increments or duplicate records.
+
+### Train / bootstrap / frozen-test protocol
+
+`configs/evaluation.yaml` configures the evaluation protocols implemented by
+`src/evaluation/protocol_runner.py`:
+
+- `static` — frozen memory, retrieval optional, no updates.
+- `prequential` — each training case predicts with memory from previous cases,
+  then reveals gold, stages reflection, and consolidates every N cases. A case
+  never learns from its own gold before prediction.
+- `train_memory_freeze_test` — creates an isolated run-specific memory
+  directory, seeds the semantic rules, runs the configured training split with
+  retrieval and updates enabled, consolidates every N cases plus a forced final
+  consolidation, saves a frozen snapshot (manifest + state hash), evaluates the
+  validation/test phases against that snapshot with updates disabled, and
+  asserts the memory state hash is unchanged afterwards.
+- `mv2026_to_cosmos_transfer` — builds memory only from the MV2026 training
+  split, freezes it, and evaluates COSMOS without updates.
+
+Validation/test cases never enter `source_case_ids`, STM, support/conflict
+counts, or LTM confidence updates; candidates derived from validation/test
+splits are rejected by the verifier, and a frozen `MemoryService` raises on any
+mutation. During frozen runs, usage events are written to the evaluation output
+directory, never into the snapshot.
 
 In self-evolving or bootstrap-memory modes, gold labels and reports are still
-blocked before prediction. After prediction, the reflection module can compare
-prediction behavior against available gold annotations and generate candidate
-memory updates. These candidates should be verified before being added to active
-memory.
+blocked before prediction. After prediction, the reflection module compares
+prediction behavior against available gold annotations, generates grounded
+candidates (episodic observation, failure lessons, and — only when the case
+contains a generalizable pattern — a semantic candidate), verifies them
+fail-closed, and stages the survivors into STM.
+
+> **Warning:** retrieved memory is guidance for planning and argumentation.
+> It is never evidence for the current claim, and memory-only arguments are
+> rejected as ungrounded.
 
 ## Reproducibility Notes
 

@@ -30,6 +30,8 @@ def evaluate_mv2026(
     llm_client=None,
     case_id: str | None = None,
     limit: int | None = None,
+    memory_service=None,
+    update_memory: bool = False,
 ) -> dict:
     root = _resolve(raw_root)
     if not root.exists():
@@ -54,9 +56,28 @@ def evaluate_mv2026(
     y_true = []
     y_prob = []
 
+    if update_memory and memory_service is not None and memory_service.frozen:
+        raise ValueError("update_memory=True is incompatible with a frozen memory service.")
+
     for case_dir in case_dirs:
         bundle = adapter.load(case_dir, split=split)
-        report = run_case_bundle(bundle, mode="inference_only", llm_client=llm_client, case_path=case_dir)
+        bundle = bundle.model_copy(
+            update={
+                "run_config": bundle.run_config.model_copy(
+                    update={"allow_memory_update": update_memory}
+                )
+            }
+        )
+        # Prequential/bootstrap: predict first with memory from previous cases,
+        # then reveal gold and stage reflection. Evaluation-only runs never update.
+        mode = "bootstrap_memory" if update_memory else "inference_only"
+        report = run_case_bundle(
+            bundle,
+            mode=mode,
+            llm_client=llm_client,
+            case_path=case_dir,
+            memory_service=memory_service,
+        )
         prediction = prediction_from_report(report, "mv2026", "multimedia_verification")
         predictions.append(prediction.model_dump(mode="json"))
 
@@ -100,7 +121,11 @@ def evaluate_mv2026(
         "confusion_matrix": confusion_matrix(gold_labels, pred_labels),
         "ece": calibration["ece"] if calibration else None,
     }
-    mem = memory_metrics(predictions, per_case)
+    mem = memory_metrics(
+        predictions,
+        per_case,
+        store=memory_service.store if memory_service is not None else None,
+    )
     out = _resolve(output_dir)
     write_records(out, predictions, gold_records, per_case, aggregate, calibration or {}, mem)
     return aggregate

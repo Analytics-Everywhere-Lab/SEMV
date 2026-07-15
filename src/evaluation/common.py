@@ -34,6 +34,7 @@ def prediction_from_report(report: VerificationReport, dataset_name: str, task_t
         ],
         predicted_source_urls=sorted({item.url for item in report.evidence if item.url}),
         memory_used_ids=[item.memory_id for item in report.memory_used],
+        memory_retrieved_ids=[item.memory_id for item in report.memory_retrieved],
         run_metadata=report.metadata,
     )
 

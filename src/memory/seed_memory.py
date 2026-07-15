@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.memory.memory_similarity import canonical_key
 from src.memory.memory_store import MemoryStore
 from src.schemas.memory_schema import MemoryRecord
 
@@ -80,14 +81,26 @@ SEED_SEMANTIC_RULES = [
 ]
 
 
-def seed_semantic_rules(memory_dir: str | Path | None = None) -> list[MemoryRecord]:
-    store = MemoryStore(Path(memory_dir) if memory_dir else None)
-    existing_ids = {record.memory_id for record in store.load_all()}
+def seed_semantic_rules(
+    memory_dir: str | Path | None = None,
+    store: MemoryStore | None = None,
+) -> list[MemoryRecord]:
+    store = store or MemoryStore(Path(memory_dir) if memory_dir else None)
+    existing = store.load_all()
+    existing_ids = {record.memory_id for record in existing}
+    existing_keys = {record.canonical_key for record in existing if record.canonical_key}
     inserted: list[MemoryRecord] = []
     for row in SEED_SEMANTIC_RULES:
-        if row["memory_id"] in existing_ids:
+        record = MemoryRecord.model_validate({**row, "origin": "seed"})
+        record = record.model_copy(
+            update={
+                "canonical_key": canonical_key(
+                    record.memory_type, record.claim_type, record.task_type, record.text
+                )
+            }
+        )
+        if record.memory_id in existing_ids or record.canonical_key in existing_keys:
             continue
-        record = MemoryRecord.model_validate(row)
         store.append(record)
         inserted.append(record)
     return inserted

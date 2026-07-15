@@ -1,21 +1,28 @@
 from __future__ import annotations
 
-from src.memory.memory_consolidator import MemoryConsolidator
-from src.memory.memory_verifier import MemoryVerifier
+from src.memory.memory_service import MemoryService
 from src.reflection.failure_classifier import FailureClassifier
 from src.reflection.lesson_generator import LessonGenerator
-from src.schemas.memory_schema import MemoryUpdateCandidate
+from src.schemas.memory_schema import MemoryUpdateCandidate, ShortTermMemoryRecord
 from src.schemas.report_schema import ReflectionLog, VerificationReport
 from src.utils.llm_client import LLMClient
 
 
 class ReflectionAgent:
-    def __init__(self, llm_client: LLMClient) -> None:
+    """Post-prediction reflection: classify failure modes, generate grounded
+    memory candidates, verify them fail-closed, and stage the survivors into
+    short-term memory. Nothing is written directly to long-term memory."""
+
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        memory_service: MemoryService | None = None,
+    ) -> None:
         self.llm_client = llm_client
+        self.memory_service = memory_service or MemoryService(llm_client=llm_client)
         self.failure_classifier = FailureClassifier()
         self.lesson_generator = LessonGenerator(llm_client)
-        self.memory_verifier = MemoryVerifier(llm_client)
-        self.memory_consolidator = MemoryConsolidator()
+        self.memory_verifier = self.memory_service.verifier(llm_client)
 
     def reflect(
         self,
@@ -38,11 +45,36 @@ class ReflectionAgent:
             lessons=[],
         )
         candidates = self.lesson_generator.generate(report, reflection)
-        verified_candidates = [self.memory_verifier.verify(candidate) for candidate in candidates]
+        valid_evidence_ids = {item.evidence_id for item in report.evidence}
+        valid_argument_ids = {
+            argument.argument_id
+            for sub in report.subclaim_reports
+            for argument in sub.top_support_arguments + sub.top_attack_arguments
+        }
+        verified_candidates = [
+            self.memory_verifier.verify(
+                candidate,
+                valid_evidence_ids=valid_evidence_ids,
+                valid_argument_ids=valid_argument_ids,
+            )
+            for candidate in candidates
+        ]
         reflection.lessons = [
             candidate.text for candidate in verified_candidates if candidate.verified
         ]
-        if update_memory:
-            applied = self.memory_consolidator.apply(verified_candidates)
-            report.memory_updates_applied = applied
+        staged: list[ShortTermMemoryRecord] = []
+        if update_memory and not self.memory_service.frozen:
+            staged = self.memory_service.stage_candidates(verified_candidates)
+            report.memory_updates_staged = staged
+            consolidation = self.memory_service.register_case_processed()
+            if consolidation is not None:
+                report.memory_consolidation_events = [
+                    event.model_dump(mode="json") for event in consolidation.events
+                ]
+                changed_ids = set(consolidation.changed_long_term_ids)
+                report.memory_updates_applied = [
+                    record
+                    for record in self.memory_service.store.load_long_term()
+                    if record.memory_id in changed_ids
+                ]
         return reflection, verified_candidates

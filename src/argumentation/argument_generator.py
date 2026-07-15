@@ -79,14 +79,19 @@ class ArgumentGenerator:
         memory_items: list[MemoryRecord],
     ) -> list[Argument]:
         del evidence_graph
+        memory_lines = [f"[{item.memory_id}] {item.text}" for item in memory_items[:3]]
+        valid_memory_ids = {item.memory_id for item in memory_items}
         prompt = (
             "Generate concise support and attack arguments for this verification "
             "sub-claim. Return JSON as "
             '{"arguments":[{"stance":"support","title":"...","text":"...",'
-            '"evidence_ids":["..."],"rationale":"..."}]}.' "\n"
+            '"evidence_ids":["..."],"used_memory_ids":["..."],"rationale":"..."}]}.' "\n"
+            "Memory items are guidance from past cases, NOT evidence: every argument "
+            "must cite current-case evidence_ids, and used_memory_ids may only list a "
+            "memory id that actually influenced the argument.\n"
             f"Sub-claim: {claim.statement}\n"
             f"Evidence: {[{'id': item.evidence_id, 'text': item.content[:220]} for item in evidence]}\n"
-            f"Memory: {[item.text for item in memory_items[:3]]}"
+            f"Memory: {memory_lines}"
         )
         try:
             data = self.llm_client.generate_json(prompt)
@@ -97,6 +102,13 @@ class ArgumentGenerator:
                     stance = "neutral"
                 text = item.get("text") or "No argument text returned."
                 evidence_ids, flags = repair_evidence_ids(item.get("evidence_ids", []), text, evidence)
+                used_memory_ids = sorted(
+                    {
+                        memory_id
+                        for memory_id in item.get("used_memory_ids", [])
+                        if memory_id in valid_memory_ids
+                    }
+                )
                 argument = self._build_argument(
                     claim=claim,
                     stance=stance,
@@ -106,6 +118,7 @@ class ArgumentGenerator:
                     evidence=evidence,
                     rationale=item.get("rationale"),
                     uncertainty_flags=flags,
+                    used_memory_ids=used_memory_ids,
                 )
                 arguments.append(argument)
             if arguments:
@@ -142,6 +155,7 @@ class ArgumentGenerator:
         evidence: list[EvidenceItem],
         rationale: str | None,
         uncertainty_flags: list[str] | None = None,
+        used_memory_ids: list[str] | None = None,
     ) -> Argument:
         components = strength_components(evidence_ids, evidence)
         intrinsic_strength = intrinsic_strength_from_components(components)
@@ -149,6 +163,10 @@ class ArgumentGenerator:
         if not evidence_ids:
             flags.append("missing_argument_evidence")
             intrinsic_strength *= 0.35
+        if used_memory_ids and not evidence_ids:
+            # Memory is guidance, not case evidence: an argument grounded only
+            # in memory has no valid current-case grounding.
+            flags.append("memory_only_grounding")
         return Argument(
             argument_id=self._argument_id(claim.claim_id, text),
             claim_id=claim.claim_id,
@@ -170,6 +188,7 @@ class ArgumentGenerator:
             corroboration=components["cross_source_corroboration"],
             cross_modal_consistency=components["cross_modal_consistency"],
             uncertainty_flags=sorted(set(flags)),
+            metadata={"used_memory_ids": sorted(used_memory_ids or [])},
         )
 
     @staticmethod

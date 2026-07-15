@@ -69,22 +69,35 @@ class ResearchPlanner:
         evidence: list[EvidenceItem],
         memory_by_claim: dict[str, list[MemoryRecord]],
     ) -> ResearchPlan:
+        memory_items = memory_by_claim.get(claim.claim_id, [])[:3]
+        memory_lines = [f"[{item.memory_id}] {item.text}" for item in memory_items]
+        valid_memory_ids = {item.memory_id for item in memory_items}
         prompt = (
             "Create a concise research plan for one multimedia verification sub-claim. "
-            "Return JSON with questions, search_queries, preferred_sources, uncertainty_checks.\n"
+            "Return JSON with questions, search_queries, preferred_sources, "
+            "uncertainty_checks, and used_memory_ids. Memory is guidance only, not "
+            "evidence; list a memory id in used_memory_ids only if that memory "
+            "actually shaped the plan.\n"
             f"Main claim: {case.claim}\nSub-claim: {claim.statement}\n"
             f"Claim type: {claim.claim_type}\n"
             f"Known evidence: {[item.title or item.content[:80] for item in evidence[:5]]}\n"
-            f"Relevant memory: {[item.text for item in memory_by_claim.get(claim.claim_id, [])[:3]]}"
+            f"Relevant memory: {memory_lines}"
         )
         try:
             data = self.llm_client.generate_json(prompt)
+            used_memory_ids = [
+                memory_id
+                for memory_id in data.get("used_memory_ids", [])
+                if memory_id in valid_memory_ids
+            ]
             return ResearchPlan(
                 claim_id=claim.claim_id,
                 questions=data.get("questions", []),
                 search_queries=data.get("search_queries", claim.search_queries),
                 preferred_sources=data.get("preferred_sources", []),
                 uncertainty_checks=data.get("uncertainty_checks", []),
+                used_memory_ids=used_memory_ids,
+                metadata={"used_memory_ids": used_memory_ids},
             )
         except Exception:
             return self._fallback_plan(case, claim)

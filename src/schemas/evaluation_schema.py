@@ -41,6 +41,7 @@ class PredictionRecord(BaseModel):
     report_path: str | None = None
     report_json_path: str | None = None
     memory_used_ids: list[str] = Field(default_factory=list)
+    memory_retrieved_ids: list[str] = Field(default_factory=list)
     run_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
