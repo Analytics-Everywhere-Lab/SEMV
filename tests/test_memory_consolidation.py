@@ -447,3 +447,122 @@ def test_concurrent_consolidation_has_no_lost_updates(tmp_path):
     assert records[0].support_count == 2
     assert sum(len(result.promoted) for result in results) == 2
     assert all(row.status == "promoted" for row in store.load_short_term())
+
+
+
+class _ConfidenceGeneralizationLLM(_GeneralizationLLM):
+    def __init__(self, confidence: float, verified: bool = True):
+        super().__init__(verified=verified)
+        self.rule_confidence = confidence
+
+    def generate_json(self, prompt, **kwargs):
+        data = super().generate_json(prompt, **kwargs)
+        if "Synthesize ONE generalized rule" in prompt:
+            data["confidence"] = self.rule_confidence
+        return data
+
+
+def test_generalization_confidence_threshold_holds_low_rule_for_review(tmp_path):
+    config = make_memory_config(tmp_path)
+    store = MemoryStore(config=config)
+    llm = _ConfidenceGeneralizationLLM(0.20)
+    consolidator = MemoryConsolidator(
+        store=store, config=config, llm_client=llm
+    )
+    consolidator.apply(_generalizable_candidates())
+
+    result = consolidator.consolidate()
+
+    proposal = store.load_long_term(memory_types=["semantic_rule"])[0]
+    assert proposal.status == "under_review"
+    assert proposal.confidence == 0.20
+    assert proposal.metadata["proposal_only"] is True
+    assert (
+        proposal.metadata["generalization_review_reason"]
+        == "generalization_confidence_below_threshold"
+    )
+    assert result.promoted == []
+    assert all(row.status == "under_review" for row in store.load_short_term())
+
+
+def test_under_review_generalization_recovers_with_new_support(tmp_path):
+    config = make_memory_config(tmp_path)
+    store = MemoryStore(config=config)
+    consolidator = MemoryConsolidator(store=store, config=config, llm_client=None)
+    consolidator.apply(_generalizable_candidates())
+    consolidator.consolidate()
+    proposal = store.load_long_term(memory_types=["semantic_rule"])[0]
+    original_id = proposal.memory_id
+    assert proposal.status == "under_review"
+
+    llm = _ConfidenceGeneralizationLLM(0.80)
+    consolidator.llm_client = llm
+    consolidator.apply(_generalizable_candidates(start=4, count=1))
+    recovered_result = consolidator.consolidate()
+
+    recovered = store.load_long_term(memory_types=["semantic_rule"])[0]
+    assert recovered.memory_id == original_id
+    assert recovered.status == "active"
+    assert recovered.metadata["proposal_only"] is False
+    assert recovered.metadata["generalization_verified"] is True
+    assert recovered.verified_by == "memory_consolidator_generalization"
+    assert all(
+        row.status in {"promoted", "merged"} for row in store.load_short_term()
+    )
+    assert any(
+        event.event_type == "generalization_recovered"
+        for event in recovered_result.events
+    )
+
+    state_hash = store.state_hash(include_short_term=True)
+    call_count = llm.synthesis_calls
+    rerun = consolidator.consolidate()
+    assert store.state_hash(include_short_term=True) == state_hash
+    assert rerun.events == []
+    assert llm.synthesis_calls == call_count
+
+
+def test_generalization_support_requires_new_case_and_fingerprint(tmp_path):
+    config = make_memory_config(
+        tmp_path,
+        consolidation={
+            "semantic_rule": {
+                "min_confidence": 0.75,
+                "min_distinct_cases": 2,
+                "min_distinct_sources": 2,
+            }
+        },
+    )
+    store = MemoryStore(config=config)
+    llm = _ConfidenceGeneralizationLLM(0.80)
+    consolidator = MemoryConsolidator(
+        store=store, config=config, llm_client=llm
+    )
+    candidates = [
+        make_candidate(
+            case_id="case1", memory_type="episodic", confidence=0.60,
+            fingerprint="fp1", verified=True,
+        ).model_copy(update={"candidate_id": "cand_case1_fp1"}),
+        make_candidate(
+            case_id="case1", memory_type="episodic", confidence=0.99,
+            fingerprint="fp2", verified=True,
+        ).model_copy(update={"candidate_id": "cand_case1_fp2"}),
+        make_candidate(
+            case_id="case2", memory_type="episodic", confidence=0.80,
+            fingerprint="fp2", verified=True,
+        ).model_copy(update={"candidate_id": "cand_case2_fp2"}),
+        make_candidate(
+            case_id="case3", memory_type="episodic", confidence=0.80,
+            fingerprint="fp3", verified=True,
+        ).model_copy(update={"candidate_id": "cand_case3_fp3"}),
+    ]
+    consolidator.apply(candidates)
+    consolidator.consolidate()
+
+    rule = store.load_long_term(memory_types=["semantic_rule"])[0]
+    # Greedy deterministic selection accepts case1/fp1, case2/fp2, case3/fp3.
+    assert rule.support_count == 3
+    assert rule.source_case_ids == ["case1", "case2", "case3"]
+    assert rule.source_fingerprints == ["fp1", "fp2", "fp3"]
+    assert abs(rule.metadata["alpha"] - 2.20) < 1e-9
+    assert abs(rule.metadata["beta"] - 0.80) < 1e-9

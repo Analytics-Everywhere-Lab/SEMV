@@ -69,6 +69,11 @@ def _store_metrics(store) -> dict:
             "merge_rate": None,
             "memory_conflict_rate": None,
             "semantic_promotion_rate": None,
+            "semantic_generalization_rate": None,
+            "semantic_generalization_proposal_count": None,
+            "semantic_generalization_recovery_count": None,
+            "active_semantic_rule_count": None,
+            "under_review_semantic_proposal_count": None,
             "average_independent_support": None,
             "active_memory_count": None,
             "under_review_memory_count": None,
@@ -98,10 +103,22 @@ def _store_metrics(store) -> dict:
     ]
     processed = [row for row in short_term if row.status in {"promoted", "merged", "staged", "under_review"}]
 
-    semantic_promoted = [
+    semantic_consolidated = [
         record
         for record in long_term
         if record.memory_type == "semantic_rule" and record.origin == "consolidated"
+    ]
+    active_semantic = [record for record in semantic_consolidated if record.status == "active"]
+    active_generalized = [
+        record for record in active_semantic
+        if record.metadata.get("generalized_from_stm_ids")
+        and not record.metadata.get("proposal_only", False)
+    ]
+    generalization_proposals = [
+        record for record in semantic_consolidated
+        if record.status == "under_review"
+        and record.metadata.get("generalized_from_stm_ids")
+        and record.metadata.get("proposal_only", False)
     ]
     semantic_candidates = [row for row in short_term if row.memory_type == "semantic_rule"]
 
@@ -118,12 +135,23 @@ def _store_metrics(store) -> dict:
         "merge_rate": _bounded_rate(len(merged), len(processed)),
         "memory_conflict_rate": _bounded_rate(len({stm_id for event in conflicted_events for stm_id in event.stm_ids}), len(processed)),
         "semantic_promotion_rate": (
-            _bounded_rate(len([record for record in semantic_promoted if not record.metadata.get("generalized_from_stm_ids")]), len(semantic_candidates))
+            _bounded_rate(len([record for record in active_semantic if not record.metadata.get("generalized_from_stm_ids")]), len(semantic_candidates))
         ),
+        # Denominator: all persisted generalized-rule outcomes.
         "semantic_generalization_rate": _bounded_rate(
-            len([record for record in semantic_promoted if record.metadata.get("generalized_from_stm_ids")]),
-            len([row for row in short_term if row.memory_type in {"episodic", "failure"}]),
+            len(active_generalized),
+            len(active_generalized) + len(generalization_proposals),
         ),
+        "semantic_generalization_proposal_count": len(generalization_proposals),
+        "semantic_generalization_recovery_count": len({
+            event.memory_id for event in store.load_consolidation_events()
+            if event.event_type == "generalization_recovered" and event.memory_id
+        }),
+        "active_semantic_rule_count": sum(
+            1 for record in long_term
+            if record.memory_type == "semantic_rule" and record.status == "active"
+        ),
+        "under_review_semantic_proposal_count": len(generalization_proposals),
         "average_independent_support": average_support,
         "active_memory_count": sum(1 for record in long_term if record.status == "active"),
         "under_review_memory_count": sum(1 for record in long_term if record.status == "under_review"),

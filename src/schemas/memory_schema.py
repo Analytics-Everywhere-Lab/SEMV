@@ -273,6 +273,7 @@ class ConsolidationEvent(BaseModel):
         "expired",
         "generalized",
         "generalization_failed",
+        "generalization_recovered",
         "snapshot",
         "archived",
         "candidate_verification",

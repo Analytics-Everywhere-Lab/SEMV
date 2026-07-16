@@ -238,7 +238,7 @@ class MemoryConsolidator:
                     for record in cluster:
                         result.unchanged.append(record.stm_id)
                     continue
-                generalized_record, verified, existed, changed, support_added = generalized
+                generalized_record, verified, existed, changed, support_added, recovered = generalized
                 if changed:
                     changed_ltm[generalized_record.memory_id] = generalized_record
                 if support_added and existed:
@@ -259,6 +259,18 @@ class MemoryConsolidator:
                             "updated_at": utc_now_iso(),
                         })
                         result.under_review.append(record.stm_id)
+                if recovered:
+                    linked_ids = set(generalized_record.metadata.get("generalized_from_stm_ids", []))
+                    for linked in stm_all:
+                        if linked.stm_id not in linked_ids or linked.status != "under_review":
+                            continue
+                        stm_updates[linked.stm_id] = linked.model_copy(update={
+                            "status": "merged",
+                            "promoted_to_memory_id": generalized_record.memory_id,
+                            "updated_at": utc_now_iso(),
+                        })
+                        if linked.stm_id not in result.merged:
+                            result.merged.append(linked.stm_id)
 
         # I. Lifecycle re-check across affected long-term records.
         for memory_id, record in list(changed_ltm.items()):
@@ -353,13 +365,14 @@ class MemoryConsolidator:
         record: ShortTermMemoryRecord,
         relation: str,
     ) -> tuple[MemoryRecord, bool]:
-        fingerprint = record.source_fingerprint or f"fp_case_{record.source_case_id}"
-        new_case = record.source_case_id not in target.source_case_ids
-        new_fingerprint = fingerprint not in target.source_fingerprints
-        # Idempotency + independence: the same case or the same source
-        # fingerprint (near-duplicate dataset rows) never counts twice.
-        if not (new_case and new_fingerprint):
+        accepted = _select_independent_observations(
+            [record], target.source_case_ids, target.source_fingerprints
+        )
+        if not accepted:
             return target, False
+        record = accepted[0]
+        fingerprint = _source_fingerprint(record)
+        # Idempotency + independence: both identity dimensions must be new.
 
         alpha, beta = self._prior(target)
         alpha += record.confidence
@@ -499,23 +512,16 @@ class MemoryConsolidator:
         representative = max(cluster, key=lambda record: record.confidence)
         thresholds = self.config.consolidation.thresholds_for(representative.memory_type)
 
-        unique: dict[str, ShortTermMemoryRecord] = {}
-        cases: set[str] = set()
-        for record in cluster:
-            fingerprint = record.source_fingerprint or f"fp_case_{record.source_case_id}"
-            if fingerprint in unique or record.source_case_id in cases:
-                continue
-            unique[fingerprint] = record
-            cases.add(record.source_case_id)
-        distinct_sources = len(unique)
-        distinct_cases = len(cases)
+        independent = _select_independent_observations(cluster)
+        distinct_sources = len(independent)
+        distinct_cases = len(independent)
 
-        alpha = sum(record.confidence for record in unique.values())
-        beta = sum(1.0 - record.confidence for record in unique.values())
+        alpha = sum(record.confidence for record in independent)
+        beta = sum(1.0 - record.confidence for record in independent)
         confidence = alpha / (alpha + beta) if alpha + beta > 0 else 0.0
 
         human_reviewed = any(
-            record.supervision_source == "human_feedback" for record in unique.values()
+            record.supervision_source == "human_feedback" for record in independent
         )
         min_cases = thresholds.min_distinct_cases
         if human_reviewed and representative.memory_type == "episodic":
@@ -564,13 +570,13 @@ class MemoryConsolidator:
             applicability_scope=representative.applicability_scope,
             exceptions=list(representative.exceptions),
             polarity=representative.polarity,
-            source_case_ids=sorted(record.source_case_id for record in unique.values()),
-            source_fingerprints=sorted(unique.keys()),
+            source_case_ids=sorted(record.source_case_id for record in independent),
+            source_fingerprints=sorted(_source_fingerprint(record) for record in independent),
             source_datasets=sorted(
-                {record.dataset_name for record in unique.values() if record.dataset_name}
+                {record.dataset_name for record in independent if record.dataset_name}
             ),
             source_splits=sorted(
-                {record.dataset_split for record in unique.values() if record.dataset_split}
+                {record.dataset_split for record in independent if record.dataset_split}
             ),
             tags=[representative.memory_type, representative.claim_type or "general"],
             confidence=confidence,
@@ -588,7 +594,7 @@ class MemoryConsolidator:
                 "beta": beta,
                 "stm_ids": [record.stm_id for record in cluster],
                 "supervision_sources": sorted(
-                    {record.supervision_source for record in unique.values()}
+                    {record.supervision_source for record in independent}
                 ),
             },
         )
@@ -600,101 +606,93 @@ class MemoryConsolidator:
         cluster: list[ShortTermMemoryRecord],
         existing_ltm: list[MemoryRecord],
         events: list[ConsolidationEvent],
-    ) -> tuple[MemoryRecord, bool, bool, bool, int] | None:
+    ) -> tuple[MemoryRecord, bool, bool, bool, int, bool] | None:
         if not self.config.consolidation.generalize_repeated_episodes or not cluster:
             return None
         if cluster[0].memory_type not in {"episodic", "failure"}:
             return None
-        unique: dict[tuple[str, str], ShortTermMemoryRecord] = {}
-        for row in cluster:
-            fingerprint = row.source_fingerprint or f"fp_case_{row.source_case_id}"
-            unique.setdefault((row.source_case_id, fingerprint), row)
-        cases = {case_id for case_id, _ in unique}
-        fingerprints = {fingerprint for _, fingerprint in unique}
+
+        independent = _select_independent_observations(cluster)
         source_signature = cluster[0].semantic_signature or semantic_signature(
-            cluster[0].memory_type, cluster[0].claim_type, cluster[0].task_type,
-            cluster[0].failure_type, cluster[0].polarity, cluster[0].applicability_scope,
+            cluster[0].memory_type,
+            cluster[0].claim_type,
+            cluster[0].task_type,
+            cluster[0].failure_type,
+            cluster[0].polarity,
+            cluster[0].applicability_scope,
         )
-        existing_source_rule = None
-        for candidate_rule in existing_ltm:
-            metadata = candidate_rule.metadata or {}
-            if (
-                candidate_rule.memory_type != "semantic_rule"
-                or candidate_rule.status not in {"active", "under_review"}
-                or metadata.get("source_memory_type") != cluster[0].memory_type
-                or metadata.get("source_semantic_signature") != source_signature
-            ):
-                continue
-            prototypes = metadata.get("source_observation_texts", [])
-            if any(normalize_text(row.text) == normalize_text(prototype) for row in unique.values() for prototype in prototypes):
-                existing_source_rule = candidate_rule
-                break
-            for row in unique.values():
-                for prototype in prototypes:
-                    prototype_item = {
-                        **row.model_dump(),
-                        "text": prototype,
-                        "canonical_key": None,
-                    }
-                    if self.similarity.relation(row.model_dump(), prototype_item) in {"equivalent", "a_entails_b", "b_entails_a", "entails"}:
-                        existing_source_rule = candidate_rule
-                        break
-                if existing_source_rule is not None:
-                    break
-            if existing_source_rule is not None:
-                break
+        existing_source_rule = self._find_source_generalization(
+            independent, existing_ltm, source_signature, cluster[0].memory_type
+        )
+        stm_ids = sorted(row.stm_id for row in cluster)
+
         if existing_source_rule is not None:
-            verified_existing = existing_source_rule.status == "active" and not existing_source_rule.metadata.get("proposal_only", False)
-            updated, added = self._merge_generalized_support(existing_source_rule, list(unique.values()), verified_existing)
+            already_active = (
+                existing_source_rule.status == "active"
+                and not existing_source_rule.metadata.get("proposal_only", False)
+            )
+            updated, added = self._merge_generalized_support(
+                existing_source_rule, independent
+            )
             changed = updated != existing_source_rule
-            if changed:
-                stm_ids = sorted(row.stm_id for row in cluster)
-                events.append(ConsolidationEvent(
-                    event_id=f"evt_{stable_hash_text('generalized_support' + existing_source_rule.memory_id + '|'.join(stm_ids))}",
-                    event_type="support_increment",
-                    memory_id=existing_source_rule.memory_id,
-                    stm_ids=stm_ids,
-                    details={"generalized": True, "new_support": added},
-                ))
-            return updated, verified_existing, True, changed, added
+            if added:
+                events.append(
+                    ConsolidationEvent(
+                        event_id=f"evt_{stable_hash_text('generalized_support' + existing_source_rule.memory_id + '|'.join(stm_ids))}",
+                        event_type="support_increment",
+                        memory_id=existing_source_rule.memory_id,
+                        stm_ids=stm_ids,
+                        details={"generalized": True, "new_support": added},
+                    )
+                )
+
+            recovered = False
+            if not already_active and updated.metadata.get("proposal_only", False) and added:
+                updated, recovered = self._reconsider_generalization(updated, events)
+                changed = updated != existing_source_rule
+            verified = already_active or recovered
+            return updated, verified, True, changed, added, recovered
+
         thresholds = self.config.consolidation.semantic_rule
-        if len(cases) < thresholds.min_distinct_cases or len(fingerprints) < thresholds.min_distinct_sources:
+        if (
+            len(independent) < thresholds.min_distinct_cases
+            or len(independent) < thresholds.min_distinct_sources
+        ):
             return None
 
-        observations = [{"case_id": row.source_case_id, "text": row.text} for row in unique.values()]
-        synthesized = True
-        rule: _GeneralizedRule
-        try:
-            if self.llm_client is None:
-                raise RuntimeError("llm_generalization_unavailable")
-            prompt = (
-                "These repeated observations from independent multimedia verification cases "
-                "form one cluster. Synthesize ONE generalized rule as JSON: "
-                '{"trigger_pattern": "...", "lesson": "...", "evidence_pattern": "...", '
-                '"argument_pattern": "...", "recommended_action": "...", '
-                '"applicability_scope": "...", "exceptions": [...], "confidence": 0.0-1.0}\n'
-                f"Observations: {observations}"
+        observations = [_source_observation(row) for row in independent]
+        rule, synthesized, synthesis_reason = self._synthesize_generalization(observations)
+        verification_succeeded = False
+        verification_reason = "generalization_verification_not_attempted"
+        if synthesized:
+            verification_succeeded, verification_reason = self._verify_generalization(
+                rule, observations
             )
-            rule = _GeneralizedRule.model_validate(self.llm_client.generate_json(prompt))
-        except Exception as exc:
-            synthesized = False
-            representative = max(unique.values(), key=lambda row: row.confidence)
-            rule = _GeneralizedRule(
-                trigger_pattern=representative.trigger_pattern or representative.text,
-                lesson=representative.lesson or representative.text,
-                evidence_pattern=representative.evidence_pattern,
-                argument_pattern=representative.argument_pattern,
-                recommended_action=representative.recommended_action or "Review the repeated pattern before reuse.",
-                applicability_scope=representative.applicability_scope,
-                exceptions=list(representative.exceptions),
-                confidence=min(0.6, representative.confidence),
-            )
-            logger.warning("Rule generalization held for review: %s", exc)
+        review_reason = self._generalization_review_reason(
+            rule,
+            synthesized=synthesized,
+            synthesis_reason=synthesis_reason,
+            verification_succeeded=verification_succeeded,
+            verification_reason=verification_reason,
+            observations=observations,
+        )
+        verified = review_reason is None
 
-        verified = synthesized and self._verify_generalization(rule, observations)
         claim_type = cluster[0].claim_type or "general"
-        rule_key = canonical_key("semantic_rule", claim_type, cluster[0].task_type, rule.lesson)
+        rule_key = canonical_key(
+            "semantic_rule", claim_type, cluster[0].task_type, rule.lesson
+        )
         now = utc_now_iso()
+        alpha = sum(row.confidence for row in independent)
+        beta = sum(1.0 - row.confidence for row in independent)
+        attempt = {
+            "attempt": 1,
+            "support": len(independent),
+            "synthesis_succeeded": synthesized,
+            "verification_succeeded": verification_succeeded,
+            "reason": review_reason,
+            "rule_confidence": rule.confidence,
+        }
         proposed = MemoryRecord(
             memory_id=f"mem_{stable_hash_text(rule_key)}",
             memory_type="semantic_rule",
@@ -709,136 +707,536 @@ class MemoryConsolidator:
             recommended_action=rule.recommended_action,
             canonical_key=rule_key,
             semantic_signature=semantic_signature(
-                "semantic_rule", claim_type, cluster[0].task_type, None, None, rule.applicability_scope
+                "semantic_rule",
+                claim_type,
+                cluster[0].task_type,
+                None,
+                None,
+                rule.applicability_scope,
             ),
             applicability_scope=rule.applicability_scope,
             exceptions=list(rule.exceptions),
-            source_case_ids=sorted(cases),
-            source_fingerprints=sorted(fingerprints),
-            source_datasets=sorted({row.dataset_name for row in unique.values() if row.dataset_name}),
-            source_splits=sorted({row.dataset_split for row in unique.values() if row.dataset_split}),
+            source_case_ids=sorted(row.source_case_id for row in independent),
+            source_fingerprints=sorted(
+                _source_fingerprint(row) for row in independent
+            ),
+            source_datasets=sorted(
+                {row.dataset_name for row in independent if row.dataset_name}
+            ),
+            source_splits=sorted(
+                {row.dataset_split for row in independent if row.dataset_split}
+            ),
             tags=["semantic_rule", "generalized"],
-            confidence=min(rule.confidence, 0.9),
-            support_count=len(unique),
-            support_weight=sum(row.confidence for row in unique.values()),
+            # This is the synthesized rule confidence. It is never raised or
+            # clamped to the configured semantic threshold.
+            confidence=rule.confidence,
+            support_count=len(independent),
+            support_weight=alpha,
             status="active" if verified else "under_review",
             origin="consolidated",
-            verified_by="memory_consolidator_generalization" if verified else None,
+            verified_by=(
+                "memory_consolidator_generalization" if verified else None
+            ),
+            proposal_only=not verified,
+            generalization_verified=verified,
             created_at=now,
             updated_at=now,
+            last_confirmed_at=now,
             metadata={
-                "generalized_from_stm_ids": sorted(row.stm_id for row in cluster),
-                "alpha": sum(row.confidence for row in unique.values()),
-                "beta": sum(1.0 - row.confidence for row in unique.values()),
+                "generalized_from_stm_ids": stm_ids,
+                "alpha": alpha,
+                "beta": beta,
+                "support_confidence": alpha / (alpha + beta) if alpha + beta else 0.0,
                 "generalization_verified": verified,
                 "proposal_only": not verified,
+                "generalization_review_reason": review_reason,
+                "generalization_attempt_count": 1,
+                "last_generalization_attempt_support": len(independent),
+                "generalization_used_fallback": not synthesized,
+                "generalization_attempts": [attempt],
                 "source_memory_type": cluster[0].memory_type,
                 "source_semantic_signature": source_signature,
-                "source_observation_texts": sorted({normalize_text(row.text) for row in unique.values()}),
+                "source_observations": observations,
+                "source_observation_texts": sorted(
+                    {normalize_text(row.text) for row in independent}
+                ),
             },
         )
 
-        target = next(
-            (row for row in existing_ltm if row.memory_type == "semantic_rule" and row.status in {"active", "under_review"}
-             and (row.canonical_key or "") == rule_key),
-            None,
-        )
-        if target is None:
-            candidates = [row for row in existing_ltm if row.memory_type == "semantic_rule" and row.status in {"active", "under_review"}]
-            relations = self.similarity.relations_batch(
-                [(proposed.model_dump(), row.model_dump()) for row in candidates]
-            ) if candidates and hasattr(self.similarity, "relations_batch") else [
-                self.similarity.relation(proposed.model_dump(), row.model_dump()) for row in candidates
-            ]
-            related = [
-                (self.similarity.similarity(proposed.text, row.text), row)
-                for row, relation in zip(candidates, relations)
-                if relation in {"equivalent", "a_entails_b", "b_entails_a", "entails"}
-            ]
-            if related:
-                target = max(related, key=lambda pair: pair[0])[1]
-
-        stm_ids = sorted(row.stm_id for row in cluster)
+        target = self._find_equivalent_semantic_rule(proposed, existing_ltm)
         if target is None:
             event_type = "generalized" if verified else "generalization_failed"
-            events.append(ConsolidationEvent(
-                event_id=f"evt_{stable_hash_text(event_type + proposed.memory_id + '|'.join(stm_ids))}",
-                event_type=event_type,
-                memory_id=proposed.memory_id,
-                stm_ids=stm_ids,
-                details={"verified_against_sources": verified, "status": proposed.status, "proposal_created": True},
-            ))
-            return proposed, verified, False, True, len(unique)
+            events.append(
+                ConsolidationEvent(
+                    event_id=f"evt_{stable_hash_text(event_type + proposed.memory_id + '|'.join(stm_ids))}",
+                    event_type=event_type,
+                    memory_id=proposed.memory_id,
+                    stm_ids=stm_ids,
+                    details={
+                        "verified_against_sources": verification_succeeded,
+                        "status": proposed.status,
+                        "proposal_created": True,
+                        "reason": review_reason,
+                    },
+                )
+            )
+            return proposed, verified, False, True, len(independent), False
 
-        updated, added = self._merge_generalized_support(target, list(unique.values()), verified)
-        changed = updated != target
-        if changed:
-            events.append(ConsolidationEvent(
-                event_id=f"evt_{stable_hash_text('generalized_support' + target.memory_id + '|'.join(stm_ids))}",
-                event_type="support_increment",
-                memory_id=target.memory_id,
-                stm_ids=stm_ids,
-                details={"generalized": True, "new_support": added},
-            ))
-        return updated, verified, True, changed, added
+        updated, added = self._merge_generalized_support(target, independent)
+        target_active = (
+            target.status == "active"
+            and not target.metadata.get("proposal_only", False)
+        )
+        recovered = False
+        if verified and target.metadata.get("proposal_only", False):
+            updated = self._activate_generalization(updated, rule)
+            recovered = True
+            events.append(self._recovery_event(updated))
+        if added:
+            events.append(
+                ConsolidationEvent(
+                    event_id=f"evt_{stable_hash_text('generalized_support' + target.memory_id + '|'.join(stm_ids))}",
+                    event_type="support_increment",
+                    memory_id=target.memory_id,
+                    stm_ids=stm_ids,
+                    details={"generalized": True, "new_support": added},
+                )
+            )
+        return (
+            updated,
+            target_active or recovered,
+            True,
+            updated != target,
+            added,
+            recovered,
+        )
+
+    def _find_source_generalization(
+        self,
+        rows: list[ShortTermMemoryRecord],
+        existing_ltm: list[MemoryRecord],
+        source_signature: str,
+        source_memory_type: str,
+    ) -> MemoryRecord | None:
+        for candidate_rule in existing_ltm:
+            metadata = candidate_rule.metadata or {}
+            if (
+                candidate_rule.memory_type != "semantic_rule"
+                or candidate_rule.status not in {"active", "under_review"}
+                or metadata.get("source_memory_type") != source_memory_type
+                or metadata.get("source_semantic_signature") != source_signature
+            ):
+                continue
+            prototypes = metadata.get("source_observation_texts", [])
+            if any(
+                normalize_text(row.text) == normalize_text(prototype)
+                for row in rows
+                for prototype in prototypes
+            ):
+                return candidate_rule
+            for row in rows:
+                for prototype in prototypes:
+                    prototype_item = {
+                        **row.model_dump(),
+                        "text": prototype,
+                        "canonical_key": None,
+                    }
+                    if self.similarity.relation(
+                        row.model_dump(), prototype_item
+                    ) in {
+                        "equivalent",
+                        "a_entails_b",
+                        "b_entails_a",
+                        "entails",
+                    }:
+                        return candidate_rule
+        return None
+
+    def _find_equivalent_semantic_rule(
+        self, proposed: MemoryRecord, existing_ltm: list[MemoryRecord]
+    ) -> MemoryRecord | None:
+        target = next(
+            (
+                row
+                for row in existing_ltm
+                if row.memory_type == "semantic_rule"
+                and row.status in {"active", "under_review"}
+                and (row.canonical_key or "") == proposed.canonical_key
+            ),
+            None,
+        )
+        if target is not None:
+            return target
+        candidates = [
+            row
+            for row in existing_ltm
+            if row.memory_type == "semantic_rule"
+            and row.status in {"active", "under_review"}
+        ]
+        relations = (
+            self.similarity.relations_batch(
+                [(proposed.model_dump(), row.model_dump()) for row in candidates]
+            )
+            if candidates and hasattr(self.similarity, "relations_batch")
+            else [
+                self.similarity.relation(proposed.model_dump(), row.model_dump())
+                for row in candidates
+            ]
+        )
+        related = [
+            (self.similarity.similarity(proposed.text, row.text), row)
+            for row, relation in zip(candidates, relations)
+            if relation
+            in {"equivalent", "a_entails_b", "b_entails_a", "entails"}
+        ]
+        return max(related, key=lambda pair: pair[0])[1] if related else None
 
     def _merge_generalized_support(
-        self, target: MemoryRecord, rows: list[ShortTermMemoryRecord], verified: bool
+        self, target: MemoryRecord, rows: list[ShortTermMemoryRecord]
     ) -> tuple[MemoryRecord, int]:
-        cases = set(target.source_case_ids)
-        fingerprints = set(target.source_fingerprints)
-        unseen = []
-        for row in rows:
-            fingerprint = row.source_fingerprint or f"fp_case_{row.source_case_id}"
-            if row.source_case_id in cases or fingerprint in fingerprints:
-                continue
-            cases.add(row.source_case_id)
-            fingerprints.add(fingerprint)
-            unseen.append(row)
-        should_activate = verified and bool(target.metadata.get("proposal_only"))
-        if not unseen and not should_activate:
+        unseen = _select_independent_observations(
+            rows, target.source_case_ids, target.source_fingerprints
+        )
+        if not unseen:
             return target, 0
+
         alpha, beta = self._prior(target)
         for row in unseen:
             alpha += row.confidence
             beta += 1.0 - row.confidence
         metadata = dict(target.metadata)
-        metadata.update({"alpha": alpha, "beta": beta})
+        metadata.update(
+            {
+                "alpha": alpha,
+                "beta": beta,
+                "support_confidence": (
+                    alpha / (alpha + beta) if alpha + beta else 0.0
+                ),
+            }
+        )
         metadata["source_observation_texts"] = sorted(
-            set(metadata.get("source_observation_texts", [])) | {normalize_text(row.text) for row in unseen}
+            set(metadata.get("source_observation_texts", []))
+            | {normalize_text(row.text) for row in unseen}
         )
         metadata["generalized_from_stm_ids"] = sorted(
-            set(metadata.get("generalized_from_stm_ids", [])) | {row.stm_id for row in rows}
+            set(metadata.get("generalized_from_stm_ids", []))
+            | {row.stm_id for row in unseen}
         )
-        if should_activate:
-            metadata.update({"proposal_only": False, "generalization_verified": True})
-        return target.model_copy(update={
-            "version": target.version + 1,
-            "confidence": alpha / (alpha + beta),
-            "support_count": target.support_count + len(unseen),
-            "support_weight": target.support_weight + sum(row.confidence for row in unseen),
-            "source_case_ids": sorted(cases),
-            "source_fingerprints": sorted(fingerprints),
-            "source_datasets": sorted(set(target.source_datasets) | {row.dataset_name for row in unseen if row.dataset_name}),
-            "source_splits": sorted(set(target.source_splits) | {row.dataset_split for row in unseen if row.dataset_split}),
-            "status": "active" if should_activate else target.status,
-            "verified_by": "memory_consolidator_generalization" if should_activate else target.verified_by,
-            "last_confirmed_at": utc_now_iso() if unseen else target.last_confirmed_at,
+        stored_observations = self._proposal_source_observations(target)
+        metadata["source_observations"] = _select_independent_observations(
+            stored_observations + [_source_observation(row) for row in unseen]
+        )
+        return (
+            target.model_copy(
+                update={
+                    "version": target.version + 1,
+                    # Preserve synthesized semantic confidence; alpha/beta track
+                    # independently grounded support in structured metadata.
+                    "support_count": target.support_count + len(unseen),
+                    "support_weight": target.support_weight
+                    + sum(row.confidence for row in unseen),
+                    "source_case_ids": sorted(
+                        set(target.source_case_ids)
+                        | {row.source_case_id for row in unseen}
+                    ),
+                    "source_fingerprints": sorted(
+                        set(target.source_fingerprints)
+                        | {_source_fingerprint(row) for row in unseen}
+                    ),
+                    "source_datasets": sorted(
+                        set(target.source_datasets)
+                        | {
+                            row.dataset_name
+                            for row in unseen
+                            if row.dataset_name
+                        }
+                    ),
+                    "source_splits": sorted(
+                        set(target.source_splits)
+                        | {
+                            row.dataset_split
+                            for row in unseen
+                            if row.dataset_split
+                        }
+                    ),
+                    "last_confirmed_at": utc_now_iso(),
+                    "updated_at": utc_now_iso(),
+                    "metadata": metadata,
+                }
+            ),
+            len(unseen),
+        )
+
+    def _reconsider_generalization(
+        self,
+        proposal: MemoryRecord,
+        events: list[ConsolidationEvent],
+    ) -> tuple[MemoryRecord, bool]:
+        metadata = dict(proposal.metadata)
+        observations = self._proposal_source_observations(proposal)
+        observations = _select_independent_observations(observations)
+        previous_reason = metadata.get("generalization_review_reason")
+        rerun_synthesis = bool(metadata.get("generalization_used_fallback")) or (
+            previous_reason
+            in {
+                "generalization_synthesis_failed",
+                "generalization_synthesis_unavailable",
+            }
+        )
+        if rerun_synthesis:
+            rule, synthesized, synthesis_reason = self._synthesize_generalization(
+                observations
+            )
+        else:
+            rule = _rule_from_record(proposal)
+            synthesized = True
+            synthesis_reason = None
+
+        verification_succeeded = False
+        verification_reason = "generalization_verification_not_attempted"
+        if synthesized:
+            verification_succeeded, verification_reason = self._verify_generalization(
+                rule, observations
+            )
+        review_reason = self._generalization_review_reason(
+            rule,
+            synthesized=synthesized,
+            synthesis_reason=synthesis_reason,
+            verification_succeeded=verification_succeeded,
+            verification_reason=verification_reason,
+            observations=observations,
+        )
+        attempt_count = int(metadata.get("generalization_attempt_count", 1)) + 1
+        attempts = list(metadata.get("generalization_attempts", []))
+        attempts.append(
+            {
+                "attempt": attempt_count,
+                "support": len(observations),
+                "synthesis_succeeded": synthesized,
+                "verification_succeeded": verification_succeeded,
+                "reason": review_reason,
+                "rule_confidence": rule.confidence,
+            }
+        )
+        metadata.update(
+            {
+                "generalization_attempt_count": attempt_count,
+                "last_generalization_attempt_support": len(observations),
+                "generalization_review_reason": review_reason,
+                "generalization_verified": review_reason is None,
+                "proposal_only": review_reason is not None,
+                "generalization_used_fallback": not synthesized,
+                "generalization_attempts": attempts,
+                "source_observations": observations,
+            }
+        )
+        updates = {
+            "version": proposal.version + 1,
+            "proposal_only": review_reason is not None,
+            "generalization_verified": review_reason is None,
             "updated_at": utc_now_iso(),
             "metadata": metadata,
-        }), len(unseen)
+        }
+        if synthesized:
+            updates.update(
+                {
+                    "text": rule.lesson,
+                    "lesson": rule.lesson,
+                    "trigger_pattern": rule.trigger_pattern,
+                    "evidence_pattern": rule.evidence_pattern,
+                    "argument_pattern": rule.argument_pattern,
+                    "recommended_action": rule.recommended_action,
+                    "applicability_scope": rule.applicability_scope,
+                    "exceptions": list(rule.exceptions),
+                    "confidence": rule.confidence,
+                }
+            )
+        reconsidered = proposal.model_copy(update=updates)
+        if review_reason is None:
+            reconsidered = self._activate_generalization(reconsidered, rule)
+            events.append(self._recovery_event(reconsidered))
+            return reconsidered, True
 
-    def _verify_generalization(self, rule: _GeneralizedRule, observations: list[dict]) -> bool:
+        events.append(
+            ConsolidationEvent(
+                event_id=f"evt_{stable_hash_text('generalization_failed' + proposal.memory_id + str(attempt_count) + str(len(observations)))}",
+                event_type="generalization_failed",
+                memory_id=proposal.memory_id,
+                stm_ids=sorted(
+                    reconsidered.metadata.get("generalized_from_stm_ids", [])
+                ),
+                details={
+                    "reason": review_reason,
+                    "attempt": attempt_count,
+                    "support": len(observations),
+                    "proposal_created": False,
+                },
+            )
+        )
+        return reconsidered, False
+
+    def _activate_generalization(
+        self, record: MemoryRecord, rule: _GeneralizedRule
+    ) -> MemoryRecord:
+        metadata = dict(record.metadata)
+        metadata.update(
+            {
+                "proposal_only": False,
+                "generalization_verified": True,
+                "generalization_review_reason": None,
+            }
+        )
+        return record.model_copy(
+            update={
+                "status": "active",
+                "proposal_only": False,
+                "generalization_verified": True,
+                "verified_by": "memory_consolidator_generalization",
+                "confidence": rule.confidence,
+                "updated_at": utc_now_iso(),
+                "metadata": metadata,
+            }
+        )
+
+    def _recovery_event(self, record: MemoryRecord) -> ConsolidationEvent:
+        stm_ids = sorted(record.metadata.get("generalized_from_stm_ids", []))
+        return ConsolidationEvent(
+            event_id=f"evt_{stable_hash_text('generalization_recovered' + record.memory_id + '|'.join(stm_ids))}",
+            event_type="generalization_recovered",
+            memory_id=record.memory_id,
+            stm_ids=stm_ids,
+            details={
+                "status": "active",
+                "support": record.support_count,
+                "attempt": record.metadata.get("generalization_attempt_count"),
+            },
+        )
+
+    def _synthesize_generalization(
+        self, observations: list[dict]
+    ) -> tuple[_GeneralizedRule, bool, str | None]:
+        try:
+            if self.llm_client is None:
+                raise RuntimeError("llm_generalization_unavailable")
+            prompt = (
+                "These repeated observations from independent multimedia verification cases "
+                "form one cluster. Synthesize ONE generalized rule as JSON: "
+                '{"trigger_pattern": "...", "lesson": "...", "evidence_pattern": "...", '
+                '"argument_pattern": "...", "recommended_action": "...", '
+                '"applicability_scope": "...", "exceptions": [...], "confidence": 0.0-1.0}\n'
+                f"Observations: {observations}"
+            )
+            return (
+                _GeneralizedRule.model_validate(
+                    self.llm_client.generate_json(prompt)
+                ),
+                True,
+                None,
+            )
+        except Exception as exc:
+            representative = max(
+                observations, key=lambda row: float(row.get("confidence", 0.0))
+            )
+            logger.warning("Rule generalization held for review: %s", exc)
+            return (
+                _GeneralizedRule(
+                    trigger_pattern=representative.get("text") or "",
+                    lesson=representative.get("text") or "",
+                    recommended_action=(
+                        "Review the repeated pattern before reuse."
+                    ),
+                    confidence=min(
+                        0.6, float(representative.get("confidence", 0.0))
+                    ),
+                ),
+                False,
+                (
+                    "generalization_synthesis_unavailable"
+                    if self.llm_client is None
+                    else "generalization_synthesis_failed"
+                ),
+            )
+
+    def _generalization_review_reason(
+        self,
+        rule: _GeneralizedRule,
+        *,
+        synthesized: bool,
+        synthesis_reason: str | None,
+        verification_succeeded: bool,
+        verification_reason: str,
+        observations: list[dict],
+    ) -> str | None:
+        thresholds = self.config.consolidation.semantic_rule
+        independent = _select_independent_observations(observations)
+        if not synthesized:
+            return synthesis_reason or "generalization_synthesis_failed"
+        if not verification_succeeded:
+            return verification_reason
+        if len(independent) < thresholds.min_distinct_cases:
+            return "generalization_distinct_cases_below_threshold"
+        if len(independent) < thresholds.min_distinct_sources:
+            return "generalization_distinct_sources_below_threshold"
+        if rule.confidence < thresholds.min_confidence:
+            return "generalization_confidence_below_threshold"
+        if not independent or not all(
+            observation.get("grounded", False) for observation in independent
+        ):
+            return "generalization_grounding_unavailable"
+        return None
+
+    def _proposal_source_observations(
+        self, proposal: MemoryRecord
+    ) -> list[dict]:
+        structured = proposal.metadata.get("source_observations")
+        if isinstance(structured, list) and structured:
+            return [dict(row) for row in structured if isinstance(row, dict)]
+
+        # Older proposals stored only parallel identity lists and normalized
+        # source texts. Reconstruct conservatively without lowering legacy
+        # support_count; future independent rows can still recover the proposal.
+        texts = list(proposal.metadata.get("source_observation_texts", []))
+        cases = list(proposal.source_case_ids)
+        fingerprints = list(proposal.source_fingerprints)
+        size = max(len(texts), len(cases), len(fingerprints))
+        observations = []
+        for index in range(size):
+            case_id = cases[index] if index < len(cases) else f"legacy_case_{index}"
+            fingerprint = (
+                fingerprints[index]
+                if index < len(fingerprints)
+                else f"fp_case_{case_id}"
+            )
+            text = texts[index] if index < len(texts) else proposal.text
+            observations.append(
+                {
+                    "case_id": case_id,
+                    "source_fingerprint": fingerprint,
+                    "stm_id": None,
+                    "text": text,
+                    "confidence": proposal.confidence,
+                    "grounded": bool(text),
+                }
+            )
+        return observations
+
+    def _verify_generalization(
+        self, rule: _GeneralizedRule, observations: list[dict]
+    ) -> tuple[bool, str]:
         prompt = (
             "Check whether this generalized rule is consistent with EVERY source observation. "
             'Return JSON {"consistent_with_all": true/false, "reason": "..."}\n'
             f"Rule: {rule.model_dump()}\nObservations: {observations}"
         )
         try:
-            data = self.llm_client.generate_json(prompt)  # type: ignore[union-attr]
-            return bool(data.get("consistent_with_all", False))
+            if self.llm_client is None:
+                raise RuntimeError("llm_generalization_unavailable")
+            data = self.llm_client.generate_json(prompt)
+            if bool(data.get("consistent_with_all", False)):
+                return True, "generalization_verified"
+            return False, "generalization_verification_failed"
         except Exception:
-            return False
+            return False, "generalization_verification_unavailable"
 
     def _rollup_usage(
         self, ltm_by_id: dict[str, MemoryRecord]
@@ -961,6 +1359,71 @@ class MemoryConsolidator:
             )
             return reactivated
         return record
+
+
+def _source_fingerprint(observation) -> str:
+    if isinstance(observation, dict):
+        fingerprint = observation.get("source_fingerprint")
+        case_id = observation.get("case_id") or observation.get("source_case_id")
+    else:
+        fingerprint = getattr(observation, "source_fingerprint", None)
+        case_id = getattr(observation, "source_case_id", None)
+    return str(fingerprint or f"fp_case_{case_id}")
+
+
+def _source_case_id(observation) -> str:
+    if isinstance(observation, dict):
+        return str(observation.get("case_id") or observation.get("source_case_id"))
+    return str(observation.source_case_id)
+
+
+def _select_independent_observations(
+    observations: list,
+    seen_case_ids=(),
+    seen_fingerprints=(),
+) -> list:
+    """Select observations for which both the case and source are unseen."""
+    cases = set(seen_case_ids)
+    fingerprints = set(seen_fingerprints)
+    accepted = []
+    for observation in observations:
+        case_id = _source_case_id(observation)
+        fingerprint = _source_fingerprint(observation)
+        if case_id in cases or fingerprint in fingerprints:
+            continue
+        cases.add(case_id)
+        fingerprints.add(fingerprint)
+        accepted.append(observation)
+    return accepted
+
+
+def _source_observation(row: ShortTermMemoryRecord) -> dict:
+    return {
+        "case_id": row.source_case_id,
+        "source_fingerprint": _source_fingerprint(row),
+        "stm_id": row.stm_id,
+        "text": row.text,
+        "confidence": row.confidence,
+        "grounded": bool(
+            row.grounding_evidence_ids or row.grounding_argument_ids
+        ),
+        "dataset_name": row.dataset_name,
+        "dataset_split": row.dataset_split,
+    }
+
+
+def _rule_from_record(record: MemoryRecord) -> _GeneralizedRule:
+    return _GeneralizedRule(
+        trigger_pattern=record.trigger_pattern or record.text,
+        lesson=record.lesson or record.text,
+        evidence_pattern=record.evidence_pattern,
+        argument_pattern=record.argument_pattern,
+        recommended_action=record.recommended_action
+        or "Review the repeated pattern before reuse.",
+        applicability_scope=record.applicability_scope,
+        exceptions=list(record.exceptions),
+        confidence=record.confidence,
+    )
 
 
 def _parse_time(value: str | None) -> datetime | None:

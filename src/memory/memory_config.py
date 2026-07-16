@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -38,7 +38,8 @@ class ShortTermConfig(BaseModel):
 
 class VerificationConfig(BaseModel):
     min_confidence: float = 0.60
-    reject_on_conflict: bool = True
+    # Contradictions are retained as verified evidence against an existing memory.
+    contradiction_policy: Literal["verified_evidence"] = "verified_evidence"
     fail_policy: str = "under_review"
     require_grounding: bool = True
 
@@ -60,7 +61,6 @@ class PromotionThresholds(BaseModel):
 
 class ConsolidationConfig(BaseModel):
     every_n_cases: int = 25
-    min_distinct_sources: int = 2
     episodic: PromotionThresholds = Field(
         default_factory=lambda: PromotionThresholds(min_confidence=0.85, min_distinct_cases=1, min_distinct_sources=1)
     )
@@ -156,10 +156,27 @@ def load_memory_config(
         data["retrieval"] = retrieval
         # Legacy flat key from the old configs/memory.yaml.
     consolidation = data.get("consolidation")
-    if isinstance(consolidation, dict) and "duplicate_similarity" in consolidation:
-        similarity = dict(data.get("similarity") or {})
-        similarity.setdefault("duplicate_similarity", consolidation["duplicate_similarity"])
-        data["similarity"] = similarity
-        consolidation = {k: v for k, v in consolidation.items() if k != "duplicate_similarity"}
+    if isinstance(consolidation, dict):
+        consolidation = dict(consolidation)
+        if "duplicate_similarity" in consolidation:
+            similarity = dict(data.get("similarity") or {})
+            similarity.setdefault("duplicate_similarity", consolidation["duplicate_similarity"])
+            data["similarity"] = similarity
+            consolidation.pop("duplicate_similarity")
+        # Legacy global thresholds fill only absent per-type thresholds.
+        legacy_sources = consolidation.pop("min_distinct_sources", None)
+        if legacy_sources is not None:
+            for memory_type in ("episodic", "failure", "semantic_rule"):
+                per_type = dict(consolidation.get(memory_type) or {})
+                per_type.setdefault("min_distinct_sources", legacy_sources)
+                consolidation[memory_type] = per_type
         data["consolidation"] = consolidation
+    verification = data.get("verification")
+    if isinstance(verification, dict):
+        verification = dict(verification)
+        # The legacy boolean never selected a different implemented policy.
+        if "reject_on_conflict" in verification:
+            verification.pop("reject_on_conflict")
+            verification.setdefault("contradiction_policy", "verified_evidence")
+        data["verification"] = verification
     return MemoryConfig.model_validate(data)

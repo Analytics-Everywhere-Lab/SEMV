@@ -22,6 +22,8 @@ evaluation:
 
   protocol:
     name: "train_memory_freeze_test"
+    # Optional paired memory-off run; disabled because it doubles evaluation cost.
+    run_paired_memory_off_baseline: false
     allow_memory_retrieval: true
     allow_memory_update_train: true
     allow_memory_update_test: false

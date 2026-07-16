@@ -17,7 +17,8 @@ short_term:
 
 verification:
   min_confidence: 0.60
-  reject_on_conflict: true
+  # Verified contradictions become conflict evidence, never competing active rules.
+  contradiction_policy: verified_evidence
   fail_policy: under_review
   require_grounding: true
 
@@ -31,7 +32,6 @@ similarity:
 
 consolidation:
   every_n_cases: 25
-  min_distinct_sources: 2
   episodic:
     min_confidence: 0.85
     min_distinct_cases: 1

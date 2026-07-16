@@ -55,3 +55,39 @@ def test_with_memory_dir_rebases_archive_and_snapshots(tmp_path):
     assert config.paths.memory_dir == str(tmp_path / "run_memory")
     assert config.paths.archive_dir == str(tmp_path / "run_memory" / "archive")
     assert config.paths.snapshot_dir == str(tmp_path / "run_memory" / "snapshots")
+
+
+
+def test_legacy_global_source_threshold_maps_to_missing_per_type_values(tmp_path):
+    legacy = tmp_path / "legacy_memory.yaml"
+    legacy.write_text(
+        "consolidation:\n"
+        "  min_distinct_sources: 4\n"
+        "  episodic:\n"
+        "    min_distinct_sources: 1\n"
+        "verification:\n"
+        "  reject_on_conflict: false\n",
+        encoding="utf-8",
+    )
+
+    config = load_memory_config(legacy)
+
+    assert config.consolidation.episodic.min_distinct_sources == 1
+    assert config.consolidation.failure.min_distinct_sources == 4
+    assert config.consolidation.semantic_rule.min_distinct_sources == 4
+    assert config.verification.contradiction_policy == "verified_evidence"
+    assert not hasattr(config.consolidation, "min_distinct_sources")
+    assert not hasattr(config.verification, "reject_on_conflict")
+
+
+def test_current_memory_yaml_has_no_disconnected_legacy_keys():
+    from src.utils.io import read_yaml
+
+    raw = read_yaml("configs/memory.yaml")
+    assert "reject_on_conflict" not in raw["verification"]
+    assert "min_distinct_sources" not in {
+        key: value
+        for key, value in raw["consolidation"].items()
+        if key not in {"episodic", "failure", "semantic_rule"}
+    }
+    assert raw["verification"]["contradiction_policy"] == "verified_evidence"

@@ -175,15 +175,34 @@ def _run_train_memory_freeze_test(
         usage_log_path=out / "eval" / "memory_usage_events.jsonl",
     )
 
+    paired_baselines = {}
     for phase in _eval_phase_configs(datasets, protocol_cfg):
-        phase_out = out / "eval" / f"{phase['dataset']}_{phase.get('split') or 'default'}"
-        results["runs"][f"eval_{phase['dataset']}_{phase.get('split') or 'default'}"] = _evaluate_phase(
+        phase_key = f"{phase['dataset']}_{phase.get('split') or 'default'}"
+        phase_out = out / "eval" / phase_key
+        baseline_case_metrics = None
+        if protocol_cfg.get("run_paired_memory_off_baseline", False):
+            baseline_phase = {**phase, "allow_memory_retrieval": False}
+            baseline_result = _evaluate_phase(
+                baseline_phase,
+                out / "eval_memory_off" / phase_key,
+                llm_client,
+                memory_service=frozen_service,
+                update_memory=False,
+                include_case_metrics=True,
+            )
+            baseline_case_metrics = baseline_result.pop("_case_metrics", None)
+            paired_baselines[phase_key] = baseline_result
+        results["runs"][f"eval_{phase_key}"] = _evaluate_phase(
             phase,
             phase_out,
             llm_client,
             memory_service=frozen_service,
             update_memory=False,
+            paired_baseline_case_metrics=baseline_case_metrics,
         )
+    if paired_baselines:
+        results["paired_memory_off_baselines"] = paired_baselines
+
 
     post_hash = frozen_service.state_hash()
     results["state_hash_after_eval"] = post_hash
@@ -278,6 +297,8 @@ def _evaluate_phase(
     llm_client,
     memory_service: MemoryService | None,
     update_memory: bool,
+    paired_baseline_case_metrics: list[dict] | None = None,
+    include_case_metrics: bool = False,
 ) -> dict:
     allow_memory_retrieval = phase.get("allow_memory_retrieval", True)
     dataset = phase.get("dataset")
@@ -292,6 +313,8 @@ def _evaluate_phase(
             memory_service=memory_service,
             update_memory=update_memory,
             allow_memory_retrieval=allow_memory_retrieval,
+            paired_baseline_case_metrics=paired_baseline_case_metrics,
+            include_case_metrics=include_case_metrics,
         )
     if dataset == "cosmos":
         return evaluate_cosmos(
@@ -304,6 +327,9 @@ def _evaluate_phase(
             memory_service=memory_service,
             update_memory=update_memory,
             allow_memory_retrieval=allow_memory_retrieval,
+            limit=phase.get("limit"),
+            paired_baseline_case_metrics=paired_baseline_case_metrics,
+            include_case_metrics=include_case_metrics,
         )
     raise ValueError(f"Unknown dataset in protocol phase: {dataset!r}")
 

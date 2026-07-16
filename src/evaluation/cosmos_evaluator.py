@@ -30,11 +30,16 @@ def evaluate_cosmos(
     memory_service=None,
     update_memory: bool = False,
     allow_memory_retrieval: bool = True,
+    limit: int | None = None,
+    paired_baseline_case_metrics: list[dict] | None = None,
+    include_case_metrics: bool = False,
 ) -> dict:
     metadata_path = _resolve(cosmos_metadata)
     if not metadata_path.exists():
         raise FileNotFoundError(f"COSMOS metadata not found: {metadata_path}")
     rows = load_cosmos_rows(metadata_path)
+    if limit is not None:
+        rows = rows[:limit]
     if not rows:
         raise ValueError(f"No COSMOS rows found in {metadata_path}")
     image_base = _resolve(image_root) if image_root else metadata_path.parent
@@ -125,9 +130,12 @@ def evaluate_cosmos(
         predictions,
         per_case,
         store=memory_service.store if memory_service is not None else None,
+        paired_baseline_case_metrics=paired_baseline_case_metrics,
     )
     out = _resolve(output_dir)
     write_records(out, predictions, gold_records, per_case, aggregate, calibration or {}, mem)
+    if include_case_metrics:
+        return {**aggregate, "_case_metrics": per_case}
     return aggregate
 
 

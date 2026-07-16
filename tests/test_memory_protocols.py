@@ -260,3 +260,87 @@ evaluation:
     ids = {record.memory_id for record in run_store.load_long_term()}
     assert {row["memory_id"] for row in SEED_SEMANTIC_RULES} <= ids
     assert any(record.origin == "consolidated" for record in run_store.load_long_term())
+
+
+
+def test_protocol_optional_paired_memory_off_baseline_matches_by_case_id(
+    tmp_path, monkeypatch
+):
+    import src.evaluation.protocol_runner as protocol_runner
+    from src.evaluation.memory_metrics import memory_metrics
+
+    calls = []
+
+    def fake_evaluate_mv2026(**kwargs):
+        calls.append(kwargs)
+        if kwargs["update_memory"]:
+            return {"dataset": "mv2026", "phase": "train"}
+        if kwargs.get("include_case_metrics"):
+            assert kwargs["allow_memory_retrieval"] is False
+            assert kwargs["update_memory"] is False
+            # Deliberately reverse case order; pairing must use case_id.
+            return {
+                "dataset": "mv2026",
+                "_case_metrics": [
+                    {"case_id": "b", "final_label_correct": True},
+                    {"case_id": "a", "final_label_correct": True},
+                ],
+            }
+        assert kwargs["allow_memory_retrieval"] is True
+        with_memory = [
+            {"case_id": "a", "final_label_correct": False},
+            {"case_id": "b", "final_label_correct": True},
+        ]
+        paired = kwargs["paired_baseline_case_metrics"]
+        return {
+            "dataset": "mv2026",
+            "negative_transfer_rate": memory_metrics(
+                [
+                    {"case_id": "a", "memory_used_ids": ["m1"]},
+                    {"case_id": "b", "memory_used_ids": []},
+                ],
+                with_memory,
+                paired_baseline_case_metrics=paired,
+            )["negative_transfer_rate"],
+        }
+
+    monkeypatch.setattr(protocol_runner, "evaluate_mv2026", fake_evaluate_mv2026)
+    config_path = tmp_path / "evaluation.yaml"
+    config_path.write_text(
+        """
+evaluation:
+  memory_config: "configs/memory.yaml"
+  datasets:
+    mv2026:
+      enabled: true
+      raw_root: "unused"
+  protocol:
+    name: "train_memory_freeze_test"
+    run_paired_memory_off_baseline: true
+    allow_memory_retrieval: true
+    train:
+      dataset: "mv2026"
+      split: "train"
+    eval:
+      - dataset: "mv2026"
+        split: "validation"
+        limit: 2
+""",
+        encoding="utf-8",
+    )
+
+    results = protocol_runner.run_protocol(
+        config_path=config_path,
+        output_dir=tmp_path / "paired_out",
+    )
+
+    assert (
+        results["runs"]["eval_mv2026_validation"]["negative_transfer_rate"]
+        == 0.5
+    )
+    assert "mv2026_validation" in results["paired_memory_off_baselines"]
+    eval_calls = [call for call in calls if not call["update_memory"]]
+    assert len(eval_calls) == 2
+    assert all(call["limit"] == 2 for call in eval_calls)
+    assert results["memory_state_unchanged"] is True
+    assert results["state_hash"] == results["state_hash_after_eval"]

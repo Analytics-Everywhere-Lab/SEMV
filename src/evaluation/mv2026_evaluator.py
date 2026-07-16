@@ -33,6 +33,8 @@ def evaluate_mv2026(
     memory_service=None,
     update_memory: bool = False,
     allow_memory_retrieval: bool = True,
+    paired_baseline_case_metrics: list[dict] | None = None,
+    include_case_metrics: bool = False,
 ) -> dict:
     root = _resolve(raw_root)
     if not root.exists():
@@ -134,9 +136,12 @@ def evaluate_mv2026(
         predictions,
         per_case,
         store=memory_service.store if memory_service is not None else None,
+        paired_baseline_case_metrics=paired_baseline_case_metrics,
     )
     out = _resolve(output_dir)
     write_records(out, predictions, gold_records, per_case, aggregate, calibration or {}, mem)
+    if include_case_metrics:
+        return {**aggregate, "_case_metrics": per_case}
     return aggregate
 
 

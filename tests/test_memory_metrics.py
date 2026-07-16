@@ -4,7 +4,8 @@ from src.evaluation.memory_metrics import memory_metrics
 from src.memory.memory_consolidator import MemoryConsolidator
 from src.memory.memory_store import MemoryStore
 
-from tests.memory_test_utils import make_candidate, make_memory_config
+from tests.memory_test_utils import make_candidate, make_memory_config, make_record
+from src.schemas.memory_schema import ConsolidationEvent
 
 
 def test_memory_metrics_without_store_returns_association_only():
@@ -67,3 +68,65 @@ def test_store_metrics_reflect_lifecycle(tmp_path):
     assert metrics["active_memory_count"] == 1
     assert metrics["average_independent_support"] == 2.0
     assert metrics["failure_recurrence_rate"] == 0.5
+
+
+
+def test_under_review_generalization_is_not_counted_as_success(tmp_path):
+    config = make_memory_config(tmp_path)
+    store = MemoryStore(config=config)
+    proposal = make_record(
+        memory_id="mem_proposal",
+        memory_type="semantic_rule",
+        status="under_review",
+        origin="consolidated",
+        support_count=3,
+        source_case_ids=["a", "b", "c"],
+        source_fingerprints=["fa", "fb", "fc"],
+        metadata={
+            "generalized_from_stm_ids": ["sa", "sb", "sc"],
+            "proposal_only": True,
+            "generalization_verified": False,
+        },
+    )
+    store.upsert_long_term([proposal])
+
+    metrics = memory_metrics([], [], store=store)
+
+    assert metrics["semantic_generalization_rate"] == 0.0
+    assert metrics["semantic_generalization_proposal_count"] == 1
+    assert metrics["under_review_semantic_proposal_count"] == 1
+    assert metrics["active_semantic_rule_count"] == 0
+
+
+def test_recovered_active_generalization_is_counted(tmp_path):
+    config = make_memory_config(tmp_path)
+    store = MemoryStore(config=config)
+    recovered = make_record(
+        memory_id="mem_recovered",
+        memory_type="semantic_rule",
+        status="active",
+        origin="consolidated",
+        support_count=4,
+        source_case_ids=["a", "b", "c", "d"],
+        source_fingerprints=["fa", "fb", "fc", "fd"],
+        metadata={
+            "generalized_from_stm_ids": ["sa", "sb", "sc", "sd"],
+            "proposal_only": False,
+            "generalization_verified": True,
+        },
+    )
+    store.upsert_long_term([recovered])
+    store.append_consolidation_event(
+        ConsolidationEvent(
+            event_id="evt_recovery",
+            event_type="generalization_recovered",
+            memory_id=recovered.memory_id,
+        )
+    )
+
+    metrics = memory_metrics([], [], store=store)
+
+    assert metrics["semantic_generalization_rate"] == 1.0
+    assert metrics["semantic_generalization_recovery_count"] == 1
+    assert metrics["semantic_generalization_proposal_count"] == 0
+    assert metrics["active_semantic_rule_count"] == 1
