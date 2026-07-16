@@ -220,6 +220,7 @@ def test_protocol_runner_freeze_test_bootstraps_and_freezes(tmp_path, monkeypatc
     config_path.write_text(
         """
 evaluation:
+  run_id: "paired_test_run"
   memory_config: "configs/memory.yaml"
   datasets:
     mv2026:
@@ -267,6 +268,7 @@ def test_protocol_optional_paired_memory_off_baseline_matches_by_case_id(
     tmp_path, monkeypatch
 ):
     import src.evaluation.protocol_runner as protocol_runner
+    from src.evaluation.common import evaluation_result
     from src.evaluation.memory_metrics import memory_metrics
 
     calls = []
@@ -279,36 +281,38 @@ def test_protocol_optional_paired_memory_off_baseline_matches_by_case_id(
             assert kwargs["allow_memory_retrieval"] is False
             assert kwargs["update_memory"] is False
             # Deliberately reverse case order; pairing must use case_id.
-            return {
-                "dataset": "mv2026",
-                "_case_metrics": [
-                    {"case_id": "b", "final_label_correct": True},
-                    {"case_id": "a", "final_label_correct": True},
-                ],
-            }
+            baseline_cases = [
+                {"case_id": "b", "final_label_correct": True},
+                {"case_id": "a", "final_label_correct": True},
+            ]
+            return evaluation_result(
+                {"dataset": "mv2026"},
+                memory_metrics([], baseline_cases),
+                baseline_cases,
+            )
         assert kwargs["allow_memory_retrieval"] is True
         with_memory = [
             {"case_id": "a", "final_label_correct": False},
             {"case_id": "b", "final_label_correct": True},
         ]
         paired = kwargs["paired_baseline_case_metrics"]
-        return {
-            "dataset": "mv2026",
-            "negative_transfer_rate": memory_metrics(
-                [
-                    {"case_id": "a", "memory_used_ids": ["m1"]},
-                    {"case_id": "b", "memory_used_ids": []},
-                ],
-                with_memory,
-                paired_baseline_case_metrics=paired,
-            )["negative_transfer_rate"],
-        }
+        memory = memory_metrics(
+            [
+                {"case_id": "a", "memory_used_ids": ["m1"]},
+                {"case_id": "b", "memory_used_ids": []},
+            ],
+            with_memory,
+            paired_baseline_case_metrics=paired,
+        )
+        return evaluation_result({"dataset": "mv2026"}, memory)
 
     monkeypatch.setattr(protocol_runner, "evaluate_mv2026", fake_evaluate_mv2026)
+
     config_path = tmp_path / "evaluation.yaml"
     config_path.write_text(
         """
 evaluation:
+  run_id: "paired_test_run"
   memory_config: "configs/memory.yaml"
   datasets:
     mv2026:
@@ -329,15 +333,37 @@ evaluation:
         encoding="utf-8",
     )
 
+    class DeterministicLLM:
+        model = "fake-model"
+        temperature = 0.0
+        top_p = 1.0
+        top_k = 1
+
     results = protocol_runner.run_protocol(
         config_path=config_path,
         output_dir=tmp_path / "paired_out",
+        llm_client=DeterministicLLM(),
     )
 
-    assert (
-        results["runs"]["eval_mv2026_validation"]["negative_transfer_rate"]
-        == 0.5
-    )
+    phase_result = results["runs"]["eval_mv2026_validation"]
+    assert phase_result["negative_transfer_rate"] == 0.5
+    assert phase_result["paired_case_count"] == 2
+    assert phase_result["baseline_correct_memory_wrong_count"] == 1
+    assert phase_result["memory_correct_baseline_wrong_count"] == 0
+    assert phase_result["both_correct_count"] == 1
+    assert phase_result["both_wrong_count"] == 0
+    assert phase_result["missing_from_memory_on"] == []
+    assert phase_result["missing_from_memory_off"] == []
+    assert phase_result["memory_metrics"]["negative_transfer_rate"] == 0.5
+    assert phase_result["evaluation_run_id"].endswith(":memory_on")
+    paired_metadata = results["paired_evaluation"]
+    assert paired_metadata["deterministic_decoding"] is True
+    assert paired_metadata["model_configuration"]["model"] == "fake-model"
+    assert paired_metadata["phases"]["mv2026_validation"]["case_ids"] == [
+        "a", "b"
+    ]
+    assert paired_metadata["snapshot_unchanged"] is True
+
     assert "mv2026_validation" in results["paired_memory_off_baselines"]
     eval_calls = [call for call in calls if not call["update_memory"]]
     assert len(eval_calls) == 2

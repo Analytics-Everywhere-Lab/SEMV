@@ -10,6 +10,39 @@ from src.schemas.report_schema import VerificationReport
 from src.utils.io import append_jsonl, write_json
 
 
+PAIRED_MEMORY_RESULT_KEYS = (
+    "negative_transfer_rate",
+    "positive_transfer_rate",
+    "paired_case_count",
+    "baseline_correct_memory_wrong_count",
+    "memory_correct_baseline_wrong_count",
+    "both_correct_count",
+    "both_wrong_count",
+    "missing_from_memory_on",
+    "missing_from_memory_off",
+    "paired_case_ids",
+)
+
+
+def evaluation_result(
+    aggregate_metrics: dict,
+    memory_metrics: dict,
+    case_metrics: list[dict] | None = None,
+) -> dict:
+    """Return backward-compatible aggregate fields plus structured metrics."""
+    result = {
+        **aggregate_metrics,
+        "aggregate_metrics": aggregate_metrics,
+        "memory_metrics": memory_metrics,
+    }
+    for key in PAIRED_MEMORY_RESULT_KEYS:
+        result[key] = memory_metrics.get(key)
+    if case_metrics is not None:
+        result["_case_metrics"] = case_metrics
+    return result
+
+
+
 def prediction_from_report(report: VerificationReport, dataset_name: str, task_type: str) -> PredictionRecord:
     return PredictionRecord(
         case_id=report.case_id,

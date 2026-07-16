@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 from src.utils.io import read_yaml, resolve_project_path
+
+
+logger = logging.getLogger("run_case")
 
 
 class MemoryPathsConfig(BaseModel):
@@ -38,8 +42,6 @@ class ShortTermConfig(BaseModel):
 
 class VerificationConfig(BaseModel):
     min_confidence: float = 0.60
-    # Contradictions are retained as verified evidence against an existing memory.
-    contradiction_policy: Literal["verified_evidence"] = "verified_evidence"
     fail_policy: str = "under_review"
     require_grounding: bool = True
 
@@ -174,9 +176,15 @@ def load_memory_config(
     verification = data.get("verification")
     if isinstance(verification, dict):
         verification = dict(verification)
-        # The legacy boolean never selected a different implemented policy.
-        if "reject_on_conflict" in verification:
-            verification.pop("reject_on_conflict")
-            verification.setdefault("contradiction_policy", "verified_evidence")
+        for legacy_key in ("reject_on_conflict", "contradiction_policy"):
+            if legacy_key not in verification:
+                continue
+            legacy_value = verification.pop(legacy_key)
+            logger.warning(
+                "Deprecated memory verification setting %s=%r was removed; "
+                "grounded, verified contradictions are always typed conflict evidence.",
+                legacy_key,
+                legacy_value,
+            )
         data["verification"] = verification
     return MemoryConfig.model_validate(data)

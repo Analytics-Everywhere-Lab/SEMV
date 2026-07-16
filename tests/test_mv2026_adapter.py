@@ -74,6 +74,9 @@ def test_mv2026_gold_is_loaded_only_by_post_prediction_provider(tmp_path, monkey
     )
     assert observed == {"provider_present": True, "gold_after_prediction": "false_context"}
     assert result["accuracy"] == 1.0
+    assert result["aggregate_metrics"]["accuracy"] == 1.0
+    assert "memory_metrics" in result
+    assert result["memory_metrics"]["negative_transfer_rate"] is None
 
 
 def test_normalized_label_aliases_do_not_create_false_failures():

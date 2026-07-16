@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.evaluation.memory_metrics import memory_metrics
+from src.evaluation.memory_metrics import memory_metrics, paired_memory_comparison
 from src.memory.memory_consolidator import MemoryConsolidator
 from src.memory.memory_store import MemoryStore
 
@@ -130,3 +130,55 @@ def test_recovered_active_generalization_is_counted(tmp_path):
     assert metrics["semantic_generalization_recovery_count"] == 1
     assert metrics["semantic_generalization_proposal_count"] == 0
     assert metrics["active_semantic_rule_count"] == 1
+
+
+def test_paired_memory_comparison_reports_all_outcomes_and_unmatched_ids():
+    memory_on = [
+        {"case_id": "positive", "final_label_correct": True},
+        {"case_id": "both_wrong", "final_label_correct": False},
+        {"case_id": "negative", "final_label_correct": False},
+        {"case_id": "both_correct", "final_label_correct": True},
+        {"case_id": "on_only", "final_label_correct": True},
+    ]
+    memory_off = [
+        {"case_id": "both_correct", "final_label_correct": True},
+        {"case_id": "negative", "final_label_correct": True},
+        {"case_id": "both_wrong", "final_label_correct": False},
+        {"case_id": "positive", "final_label_correct": False},
+        {"case_id": "off_only", "final_label_correct": True},
+    ]
+
+    comparison = paired_memory_comparison(memory_on, memory_off)
+
+    assert comparison["paired_case_count"] == 4
+    assert comparison["negative_transfer_rate"] == 0.25
+    assert comparison["positive_transfer_rate"] == 0.25
+    assert comparison["baseline_correct_memory_wrong_count"] == 1
+    assert comparison["memory_correct_baseline_wrong_count"] == 1
+    assert comparison["both_correct_count"] == 1
+    assert comparison["both_wrong_count"] == 1
+    assert comparison["missing_from_memory_on"] == ["off_only"]
+    assert comparison["missing_from_memory_off"] == ["on_only"]
+    assert comparison["paired_case_ids"] == [
+        "both_correct", "both_wrong", "negative", "positive"
+    ]
+
+
+def test_paired_memory_comparison_rejects_duplicate_case_ids():
+    import pytest
+
+    duplicate = [
+        {"case_id": "same", "final_label_correct": True},
+        {"case_id": "same", "final_label_correct": False},
+    ]
+    with pytest.raises(ValueError, match="Duplicate case_id"):
+        paired_memory_comparison(duplicate, [])
+
+
+def test_no_baseline_returns_no_transfer_claim():
+    comparison = paired_memory_comparison(
+        [{"case_id": "a", "final_label_correct": False}], None
+    )
+    assert comparison["negative_transfer_rate"] is None
+    assert comparison["positive_transfer_rate"] is None
+    assert comparison["paired_case_count"] == 0

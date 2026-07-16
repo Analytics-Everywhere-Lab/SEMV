@@ -23,6 +23,7 @@ def memory_metrics(
     helpful = [row for row in used_cases if correct_by_case.get(row["case_id"]) is True]
     harmful = [row for row in used_cases if correct_by_case.get(row["case_id"]) is False]
 
+    comparison = paired_memory_comparison(case_metrics, paired_baseline_case_metrics)
     metrics = {
         "memory_retrieval_rate": sum(1 for count in retrieved if count > 0) / len(retrieved) if retrieved else 0.0,
         "average_memories_retrieved_per_case": sum(retrieved) / len(retrieved) if retrieved else 0.0,
@@ -32,33 +33,94 @@ def memory_metrics(
             len(helpful) / len(used_cases) if used_cases else None
         ),
         "memory_associated_error_rate": len(harmful) / len(used_cases) if used_cases else None,
-        # Association is not causation: without a paired memory-off run this
-        # must not be reported as negative transfer.
-        "negative_transfer_rate": _paired_negative_transfer(
-            case_metrics, paired_baseline_case_metrics
-        ),
     }
+    metrics.update(comparison)
     metrics.update(_store_metrics(store))
     return metrics
 
 
-def _paired_negative_transfer(
-    case_metrics: list[dict],
-    baseline_case_metrics: list[dict] | None,
-) -> float | None:
-    """Fraction of paired cases correct without memory but wrong with memory."""
-    if not baseline_case_metrics:
-        return None
-    baseline_by_case = {row["case_id"]: row.get("final_label_correct") for row in baseline_case_metrics}
-    paired = [
-        (row.get("final_label_correct"), baseline_by_case[row["case_id"]])
-        for row in case_metrics
-        if row["case_id"] in baseline_by_case
-    ]
-    if not paired:
-        return None
-    flipped_bad = sum(1 for with_mem, without_mem in paired if without_mem is True and with_mem is False)
-    return flipped_bad / len(paired)
+def paired_memory_comparison(
+    memory_on_case_metrics: list[dict],
+    memory_off_case_metrics: list[dict] | None,
+) -> dict:
+    """Compare matched memory-on/off outcomes by case_id.
+
+    Duplicate case IDs are rejected because silently overwriting them would make
+    the paired estimate ambiguous. Rates use matched case IDs only.
+    """
+    empty = {
+        "negative_transfer_rate": None,
+        "positive_transfer_rate": None,
+        "paired_case_count": 0,
+        "baseline_correct_memory_wrong_count": 0,
+        "memory_correct_baseline_wrong_count": 0,
+        "both_correct_count": 0,
+        "both_wrong_count": 0,
+        "missing_from_memory_on": [],
+        "missing_from_memory_off": [],
+        "paired_case_ids": [],
+    }
+    if memory_off_case_metrics is None:
+        return empty
+
+    memory_on = _unique_case_metrics(memory_on_case_metrics, "memory-on")
+    memory_off = _unique_case_metrics(memory_off_case_metrics, "memory-off")
+    paired_case_ids = sorted(set(memory_on) & set(memory_off))
+    missing_from_memory_on = sorted(set(memory_off) - set(memory_on))
+    missing_from_memory_off = sorted(set(memory_on) - set(memory_off))
+
+    counts = {
+        "baseline_correct_memory_wrong_count": 0,
+        "memory_correct_baseline_wrong_count": 0,
+        "both_correct_count": 0,
+        "both_wrong_count": 0,
+    }
+    for case_id in paired_case_ids:
+        with_memory = memory_on[case_id].get("final_label_correct") is True
+        without_memory = memory_off[case_id].get("final_label_correct") is True
+        if without_memory and not with_memory:
+            counts["baseline_correct_memory_wrong_count"] += 1
+        elif with_memory and not without_memory:
+            counts["memory_correct_baseline_wrong_count"] += 1
+        elif with_memory and without_memory:
+            counts["both_correct_count"] += 1
+        else:
+            counts["both_wrong_count"] += 1
+
+    denominator = len(paired_case_ids)
+    return {
+        "negative_transfer_rate": (
+            counts["baseline_correct_memory_wrong_count"] / denominator
+            if denominator
+            else None
+        ),
+        "positive_transfer_rate": (
+            counts["memory_correct_baseline_wrong_count"] / denominator
+            if denominator
+            else None
+        ),
+        "paired_case_count": denominator,
+        **counts,
+        "missing_from_memory_on": missing_from_memory_on,
+        "missing_from_memory_off": missing_from_memory_off,
+        "paired_case_ids": paired_case_ids,
+    }
+
+
+def _unique_case_metrics(rows: list[dict], run_name: str) -> dict[str, dict]:
+    indexed: dict[str, dict] = {}
+    duplicates: set[str] = set()
+    for row in rows:
+        case_id = str(row["case_id"])
+        if case_id in indexed:
+            duplicates.add(case_id)
+        indexed[case_id] = row
+    if duplicates:
+        raise ValueError(
+            f"Duplicate case_id values in {run_name} metrics: {sorted(duplicates)}"
+        )
+    return indexed
+
 
 
 def _store_metrics(store) -> dict:

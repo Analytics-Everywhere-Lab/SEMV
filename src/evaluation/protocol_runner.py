@@ -37,7 +37,8 @@ def run_protocol(
     config = read_yaml(config_path)
     evaluation = config.get("evaluation", {})
     datasets = evaluation.get("datasets", {})
-    protocol_cfg = evaluation.get("protocol", {})
+    protocol_cfg = dict(evaluation.get("protocol", {}))
+    protocol_cfg["_evaluation_run_id"] = evaluation.get("run_id")
     selected = protocol or protocol_cfg.get("name", "static")
     out = _resolve(output_dir or "data/outputs/evaluation/joint_mv_cosmos")
     out.mkdir(parents=True, exist_ok=True)
@@ -175,12 +176,35 @@ def _run_train_memory_freeze_test(
         usage_log_path=out / "eval" / "memory_usage_events.jsonl",
     )
 
+    paired_enabled = bool(
+        protocol_cfg.get("run_paired_memory_off_baseline", False)
+    )
+    evaluation_run_id = (
+        protocol_cfg.get("_evaluation_run_id") or "semv_evaluation"
+    )
+    decoding = _llm_reproducibility(llm_client)
+    if paired_enabled and decoding["deterministic_decoding"] is False:
+        logger.warning(
+            "Paired memory evaluation uses stochastic decoding; transfer "
+            "estimates may include decoding variance and are not strictly causal."
+        )
+    results["evaluation_run_id"] = evaluation_run_id
+    results["paired_evaluation"] = {
+        "enabled": paired_enabled,
+        "snapshot_hash_before": frozen_hash,
+        "deterministic_decoding": decoding["deterministic_decoding"],
+        "model_configuration": decoding["model_configuration"],
+        "phases": {},
+    }
+
     paired_baselines = {}
     for phase in _eval_phase_configs(datasets, protocol_cfg):
         phase_key = f"{phase['dataset']}_{phase.get('split') or 'default'}"
         phase_out = out / "eval" / phase_key
         baseline_case_metrics = None
-        if protocol_cfg.get("run_paired_memory_off_baseline", False):
+        baseline_run_id = f"{evaluation_run_id}:{phase_key}:memory_off"
+        memory_on_run_id = f"{evaluation_run_id}:{phase_key}:memory_on"
+        if paired_enabled:
             baseline_phase = {**phase, "allow_memory_retrieval": False}
             baseline_result = _evaluate_phase(
                 baseline_phase,
@@ -191,8 +215,13 @@ def _run_train_memory_freeze_test(
                 include_case_metrics=True,
             )
             baseline_case_metrics = baseline_result.pop("_case_metrics", None)
+            baseline_result["evaluation_run_id"] = baseline_run_id
+            baseline_result["deterministic_decoding"] = decoding[
+                "deterministic_decoding"
+            ]
             paired_baselines[phase_key] = baseline_result
-        results["runs"][f"eval_{phase_key}"] = _evaluate_phase(
+
+        memory_on_result = _evaluate_phase(
             phase,
             phase_out,
             llm_client,
@@ -200,12 +229,30 @@ def _run_train_memory_freeze_test(
             update_memory=False,
             paired_baseline_case_metrics=baseline_case_metrics,
         )
+        memory_on_result["evaluation_run_id"] = memory_on_run_id
+        memory_on_result["deterministic_decoding"] = decoding[
+            "deterministic_decoding"
+        ]
+        results["runs"][f"eval_{phase_key}"] = memory_on_result
+        if paired_enabled:
+            results["paired_evaluation"]["phases"][phase_key] = {
+                "memory_on_run_id": memory_on_run_id,
+                "memory_off_run_id": baseline_run_id,
+                "case_ids": memory_on_result.get("paired_case_ids", []),
+                "paired_case_count": memory_on_result.get(
+                    "paired_case_count", 0
+                ),
+            }
     if paired_baselines:
         results["paired_memory_off_baselines"] = paired_baselines
 
 
+
+
     post_hash = frozen_service.state_hash()
     results["state_hash_after_eval"] = post_hash
+    results["paired_evaluation"]["snapshot_hash_after"] = post_hash
+    results["paired_evaluation"]["snapshot_unchanged"] = post_hash == frozen_hash
     if post_hash != frozen_hash:
         raise RuntimeError(
             "Frozen memory snapshot changed during validation/test: "
@@ -383,6 +430,22 @@ def _ensure_clean_memory_dir(memory_dir: Path, resume: bool) -> None:
             f"Protocol memory directory already contains state: {memory_dir}. "
             "Use a clean output directory or set resume=true explicitly."
         )
+
+
+def _llm_reproducibility(llm_client) -> dict:
+    client = getattr(llm_client, "wrapped", llm_client)
+    model_configuration = {}
+    for name in ("model", "temperature", "top_p", "top_k", "max_tokens"):
+        value = getattr(client, name, None)
+        if value is not None:
+            model_configuration[name] = value
+    temperature = model_configuration.get("temperature")
+    deterministic = None if temperature is None else float(temperature) == 0.0
+    return {
+        "deterministic_decoding": deterministic,
+        "model_configuration": model_configuration,
+    }
+
 
 
 def _resolve(path: str | Path) -> Path:

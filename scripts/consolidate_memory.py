@@ -44,6 +44,14 @@ def main() -> None:
         help="After applying, write a frozen snapshot with manifest and state hash.",
     )
     parser.add_argument(
+        "--retry-under-review",
+        action="store_true",
+        help=(
+            "Explicitly retry eligible generalized under-review proposals; "
+            "dry runs report changes without writing them."
+        ),
+    )
+    parser.add_argument(
         "--use-llm",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -65,9 +73,12 @@ def main() -> None:
         store = MemoryStore(config=config, read_only=dry_run)
         llm_client = build_llm_client() if args.use_llm else None
         service = MemoryService(config=config, store=store, llm_client=llm_client)
-        result = service.consolidate(dry_run=dry_run)
+        result = service.consolidate(
+            dry_run=dry_run, retry_under_review=args.retry_under_review
+        )
         output.update(
             {
+                "retry_under_review": args.retry_under_review,
                 "consolidation_mode": "llm-assisted" if args.use_llm else "deterministic-only",
                 "counts_before": result.counts_before,
                 "counts_after": result.counts_after,

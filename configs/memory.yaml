@@ -17,8 +17,6 @@ short_term:
 
 verification:
   min_confidence: 0.60
-  # Verified contradictions become conflict evidence, never competing active rules.
-  contradiction_policy: verified_evidence
   fail_policy: under_review
   require_grounding: true
 

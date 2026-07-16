@@ -78,11 +78,17 @@ class MemoryConsolidator:
 
     # ----------------------------------------------------------- consolidation
 
-    def consolidate(self, dry_run: bool = False) -> ConsolidationResult:
+    def consolidate(
+        self, dry_run: bool = False, retry_under_review: bool = False
+    ) -> ConsolidationResult:
         with self.store.transaction():
-            return self._consolidate_locked(dry_run=dry_run)
+            return self._consolidate_locked(
+                dry_run=dry_run, retry_under_review=retry_under_review
+            )
 
-    def _consolidate_locked(self, dry_run: bool = False) -> ConsolidationResult:
+    def _consolidate_locked(
+        self, dry_run: bool = False, retry_under_review: bool = False
+    ) -> ConsolidationResult:
         result = ConsolidationResult(dry_run=dry_run, counts_before=self.store.counts())
         events: list[ConsolidationEvent] = []
         now = datetime.now(timezone.utc)
@@ -272,6 +278,64 @@ class MemoryConsolidator:
                         if linked.stm_id not in result.merged:
                             result.merged.append(linked.stm_id)
 
+        # H. Explicit retry for generalized proposals whose LLM-dependent
+        # attempt could not complete (or whose low confidence is being retried
+        # deliberately). Conflict-driven under-review memories are excluded.
+        if retry_under_review:
+            attempted_this_run = {
+                event.memory_id for event in events
+                if event.event_type in {"generalization_failed", "generalization_recovered"}
+            }
+            retryable_reasons = {
+                "generalization_synthesis_unavailable",
+                "generalization_synthesis_failed",
+                "generalization_verification_unavailable",
+                "generalization_confidence_below_threshold",
+            }
+            for proposal in current_ltm():
+                metadata = proposal.metadata or {}
+                review_reason = metadata.get("generalization_review_reason")
+                if (
+                    proposal.memory_id in attempted_this_run
+                    or proposal.memory_type != "semantic_rule"
+                    or proposal.status != "under_review"
+                    or not metadata.get("proposal_only", False)
+                    or not metadata.get("generalized_from_stm_ids")
+                    or review_reason not in retryable_reasons
+                ):
+                    continue
+                retried, recovered = self._reconsider_generalization(
+                    proposal,
+                    events,
+                    force_synthesis=(
+                        review_reason
+                        == "generalization_confidence_below_threshold"
+                    ),
+                )
+                changed_ltm[retried.memory_id] = retried
+                if recovered:
+                    linked_ids = set(
+                        retried.metadata.get("generalized_from_stm_ids", [])
+                    )
+                    for linked in stm_all:
+                        if (
+                            linked.stm_id not in linked_ids
+                            or linked.status != "under_review"
+                        ):
+                            continue
+                        stm_updates[linked.stm_id] = linked.model_copy(
+                            update={
+                                "status": "merged",
+                                "promoted_to_memory_id": retried.memory_id,
+                                "updated_at": utc_now_iso(),
+                            }
+                        )
+                        if linked.stm_id not in result.merged:
+                            result.merged.append(linked.stm_id)
+                elif retried.memory_id not in result.under_review:
+                    result.under_review.append(retried.memory_id)
+
+
         # I. Lifecycle re-check across affected long-term records.
         for memory_id, record in list(changed_ltm.items()):
             changed_ltm[memory_id] = self._lifecycle_check(record, result, events)
@@ -417,6 +481,8 @@ class MemoryConsolidator:
             True,
         )
 
+    # Safety invariant: this path only updates conflict evidence on the target;
+    # it never promotes the contradictory observation as a golden rule.
     def _apply_conflict(
         self,
         target: MemoryRecord,
@@ -971,12 +1037,13 @@ class MemoryConsolidator:
         self,
         proposal: MemoryRecord,
         events: list[ConsolidationEvent],
+        force_synthesis: bool = False,
     ) -> tuple[MemoryRecord, bool]:
         metadata = dict(proposal.metadata)
         observations = self._proposal_source_observations(proposal)
         observations = _select_independent_observations(observations)
         previous_reason = metadata.get("generalization_review_reason")
-        rerun_synthesis = bool(metadata.get("generalization_used_fallback")) or (
+        rerun_synthesis = force_synthesis or bool(metadata.get("generalization_used_fallback")) or (
             previous_reason
             in {
                 "generalization_synthesis_failed",

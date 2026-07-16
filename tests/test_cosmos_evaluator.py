@@ -21,5 +21,8 @@ def test_cosmos_evaluator_writes_metrics(tmp_path):
     result = evaluate_cosmos(metadata, image_root, output, llm_client=FakeLLMClient())
 
     assert result["dataset"] == "cosmos"
+    assert result["aggregate_metrics"]["dataset"] == "cosmos"
+    assert "memory_metrics" in result
+    assert result["memory_metrics"]["negative_transfer_rate"] is None
     assert (output / "predictions.jsonl").exists()
     assert (output / "aggregate_metrics.json").exists()

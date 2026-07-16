@@ -75,7 +75,6 @@ def test_legacy_global_source_threshold_maps_to_missing_per_type_values(tmp_path
     assert config.consolidation.episodic.min_distinct_sources == 1
     assert config.consolidation.failure.min_distinct_sources == 4
     assert config.consolidation.semantic_rule.min_distinct_sources == 4
-    assert config.verification.contradiction_policy == "verified_evidence"
     assert not hasattr(config.consolidation, "min_distinct_sources")
     assert not hasattr(config.verification, "reject_on_conflict")
 
@@ -90,4 +89,34 @@ def test_current_memory_yaml_has_no_disconnected_legacy_keys():
         for key, value in raw["consolidation"].items()
         if key not in {"episodic", "failure", "semantic_rule"}
     }
-    assert raw["verification"]["contradiction_policy"] == "verified_evidence"
+    assert "contradiction_policy" not in raw["verification"]
+
+
+
+def test_legacy_reject_on_conflict_logs_deprecation(tmp_path, caplog):
+    legacy = tmp_path / "legacy_reject.yaml"
+    legacy.write_text(
+        "verification:\n  reject_on_conflict: true\n", encoding="utf-8"
+    )
+
+    with caplog.at_level("WARNING", logger="run_case"):
+        config = load_memory_config(legacy)
+
+    assert not hasattr(config.verification, "reject_on_conflict")
+    assert "reject_on_conflict" in caplog.text
+    assert "Deprecated" in caplog.text
+
+
+def test_legacy_contradiction_policy_logs_deprecation(tmp_path, caplog):
+    legacy = tmp_path / "legacy_policy.yaml"
+    legacy.write_text(
+        "verification:\n  contradiction_policy: verified_evidence\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("WARNING", logger="run_case"):
+        config = load_memory_config(legacy)
+
+    assert not hasattr(config.verification, "contradiction_policy")
+    assert "contradiction_policy" in caplog.text
+    assert "Deprecated" in caplog.text

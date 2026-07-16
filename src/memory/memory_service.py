@@ -171,10 +171,14 @@ class MemoryService:
             return self.consolidate()
         return None
 
-    def consolidate(self, dry_run: bool = False) -> ConsolidationResult:
+    def consolidate(
+        self, dry_run: bool = False, retry_under_review: bool = False
+    ) -> ConsolidationResult:
         if self.frozen and not dry_run:
             raise MemoryFrozenError("Frozen memory cannot be consolidated.")
-        return self.consolidator.consolidate(dry_run=dry_run)
+        return self.consolidator.consolidate(
+            dry_run=dry_run, retry_under_review=retry_under_review
+        )
 
     # ----------------------------------------------------------------- events
 

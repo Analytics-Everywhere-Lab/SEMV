@@ -176,7 +176,9 @@ def test_contradiction_increments_conflict_and_can_trigger_under_review(tmp_path
     )
     result = consolidator.consolidate()
 
-    record = store.load_long_term()[0]
+    long_term = store.load_long_term()
+    assert len(long_term) == 1
+    record = long_term[0]
     assert record.conflict_count == 1
     assert record.status == "under_review"
     assert result.conflicted
@@ -566,3 +568,90 @@ def test_generalization_support_requires_new_case_and_fingerprint(tmp_path):
     assert rule.source_fingerprints == ["fp1", "fp2", "fp3"]
     assert abs(rule.metadata["alpha"] - 2.20) < 1e-9
     assert abs(rule.metadata["beta"] - 0.80) < 1e-9
+
+
+
+def test_manual_retry_recovers_without_new_support_and_preserves_identity(tmp_path):
+    config = make_memory_config(tmp_path)
+    store = MemoryStore(config=config)
+    consolidator = MemoryConsolidator(store=store, config=config, llm_client=None)
+    consolidator.apply(_generalizable_candidates())
+    consolidator.consolidate()
+    proposal = store.load_long_term(memory_types=["semantic_rule"])[0]
+    original_id = proposal.memory_id
+
+    llm = _ConfidenceGeneralizationLLM(0.80)
+    consolidator.llm_client = llm
+    result = consolidator.consolidate(retry_under_review=True)
+
+    recovered = store.load_long_term(memory_types=["semantic_rule"])[0]
+    assert recovered.memory_id == original_id
+    assert recovered.status == "active"
+    assert recovered.metadata["generalization_attempt_count"] == 2
+    assert len(recovered.metadata["generalization_attempts"]) == 2
+    assert all(row.status == "merged" for row in store.load_short_term())
+    assert any(
+        event.event_type == "generalization_recovered" for event in result.events
+    )
+
+
+def test_failed_manual_retry_stays_under_review_with_one_new_attempt(tmp_path):
+    config = make_memory_config(tmp_path)
+    store = MemoryStore(config=config)
+    consolidator = MemoryConsolidator(store=store, config=config, llm_client=None)
+    consolidator.apply(_generalizable_candidates())
+    consolidator.consolidate()
+
+    result = consolidator.consolidate(retry_under_review=True)
+
+    proposal = store.load_long_term(memory_types=["semantic_rule"])[0]
+    assert proposal.status == "under_review"
+    assert proposal.metadata["generalization_attempt_count"] == 2
+    assert len(proposal.metadata["generalization_attempts"]) == 2
+    assert sum(
+        event.event_type == "generalization_failed" for event in result.events
+    ) == 1
+
+
+def test_manual_retry_dry_run_reports_but_never_mutates(tmp_path):
+    config = make_memory_config(tmp_path)
+    store = MemoryStore(config=config)
+    consolidator = MemoryConsolidator(store=store, config=config, llm_client=None)
+    consolidator.apply(_generalizable_candidates())
+    consolidator.consolidate()
+    proposal = store.load_long_term(memory_types=["semantic_rule"])[0]
+    state_hash = store.state_hash(include_short_term=True)
+
+    consolidator.llm_client = _ConfidenceGeneralizationLLM(0.80)
+    result = consolidator.consolidate(
+        dry_run=True, retry_under_review=True
+    )
+
+    assert proposal.memory_id in result.changed_long_term_ids
+    assert any(
+        event.event_type == "generalization_recovered" for event in result.events
+    )
+    assert store.state_hash(include_short_term=True) == state_hash
+    persisted = store.load_long_term(memory_types=["semantic_rule"])[0]
+    assert persisted.status == "under_review"
+    assert all(row.status == "under_review" for row in store.load_short_term())
+
+
+def test_manual_retry_never_retries_active_rules(tmp_path):
+    config = make_memory_config(tmp_path)
+    store = MemoryStore(config=config)
+    llm = _ConfidenceGeneralizationLLM(0.80)
+    consolidator = MemoryConsolidator(
+        store=store, config=config, llm_client=llm
+    )
+    consolidator.apply(_generalizable_candidates())
+    consolidator.consolidate()
+    call_count = llm.synthesis_calls
+    state_hash = store.state_hash(include_short_term=True)
+
+    result = consolidator.consolidate(retry_under_review=True)
+
+    assert result.events == []
+    assert result.changed_long_term_ids == []
+    assert llm.synthesis_calls == call_count
+    assert store.state_hash(include_short_term=True) == state_hash

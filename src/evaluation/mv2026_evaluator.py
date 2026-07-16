@@ -7,6 +7,7 @@ from src.evaluation.common import (
     binary_probability,
     classification_metrics,
     confusion_matrix,
+    evaluation_result,
     prediction_from_report,
     write_records,
 )
@@ -140,9 +141,9 @@ def evaluate_mv2026(
     )
     out = _resolve(output_dir)
     write_records(out, predictions, gold_records, per_case, aggregate, calibration or {}, mem)
-    if include_case_metrics:
-        return {**aggregate, "_case_metrics": per_case}
-    return aggregate
+    return evaluation_result(
+        aggregate, mem, per_case if include_case_metrics else None
+    )
 
 
 def _discover_case_dirs(root: Path) -> list[Path]:

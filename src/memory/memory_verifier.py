@@ -30,8 +30,10 @@ class MemoryVerifier:
     (3) exact/canonical duplicate check, (4) semantic equivalence/contradiction
     check, (5) LLM safety/generalizability verification where required.
 
-    Any LLM failure (timeout, parse error, unavailable model, any exception)
-    yields verified=False with verification_status="under_review" — never
+    A grounded contradiction that passes this fail-closed verification is
+    always typed evidence against its related memory; it is never a competing
+    active golden rule. Any LLM failure (timeout, parse error, unavailable
+    model, any exception) yields verified=False with verification_status="under_review" — never
     automatic acceptance.
     """
 

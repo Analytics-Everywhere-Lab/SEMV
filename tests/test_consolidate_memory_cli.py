@@ -95,3 +95,19 @@ def test_cli_snapshot_requires_apply(tmp_path):
     with pytest.raises(subprocess.CalledProcessError):
         _run_cli(missing, "--snapshot")
     assert not missing.exists()
+
+
+
+def test_cli_retry_flag_defaults_false_and_dry_run_is_non_mutating(tmp_path):
+    store = _prepare_memory(tmp_path)
+    state_hash = store.state_hash(include_short_term=True)
+
+    ordinary = _run_cli(store.memory_dir, "--dry-run")
+    retried = _run_cli(
+        store.memory_dir, "--dry-run", "--retry-under-review"
+    )
+
+    assert ordinary["retry_under_review"] is False
+    assert retried["retry_under_review"] is True
+    assert retried["dry_run"] is True
+    assert store.state_hash(include_short_term=True) == state_hash

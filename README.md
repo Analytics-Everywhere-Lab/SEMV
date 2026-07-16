@@ -41,6 +41,90 @@ For each case, the pipeline performs the following stages:
 Gold labels and gold reports are guarded by leakage checks and are only used
 post-prediction in self-evolving or bootstrap-memory modes.
 
+## Memory Lifecycle and Evaluation
+
+### Proposal lifecycle
+
+Verified case observations enter short-term memory and are consolidated only
+after the configured independent case/source and confidence thresholds pass.
+Repeated episodic or failure observations can produce a generalized semantic
+proposal:
+
+```text
+under_review proposal
+    -> new independent support or explicit retry
+    -> synthesis/verification rerun
+    -> active if all semantic thresholds pass
+    -> remains under_review otherwise
+```
+
+A synthesized rule below the semantic confidence threshold is never active, and
+active-only retrieval excludes every under_review proposal. Recovery updates
+the existing record in place, preserving its memory ID and complete attempt
+history. Consolidation runs without new independent support or an explicit
+retry are idempotent.
+
+LLM-dependent failures can be retried after the model becomes available:
+
+```bash
+python scripts/consolidate_memory.py \
+  --config configs/memory.yaml \
+  --apply \
+  --use-llm \
+  --retry-under-review
+```
+
+The retry option applies only to generalized proposal-only semantic records
+with retryable synthesis, verification-availability, or explicitly retried
+low-confidence outcomes. Conflict-driven under-review memories and active rules
+are not retried. Combining it with dry-run reports expected transitions without
+mutating memory.
+
+Contradiction handling is a fixed safety invariant, not configuration: a
+grounded contradiction that passes fail-closed LLM verification is staged as
+typed conflict evidence against the related memory. It can increment conflict
+statistics and change the target lifecycle, but it never becomes a competing
+active golden rule automatically.
+
+### Paired memory evaluation
+
+Enable the optional frozen memory-on/memory-off comparison with:
+
+```yaml
+evaluation:
+  protocol:
+    run_paired_memory_off_baseline: true
+```
+
+This approximately doubles evaluation cost. Both runs use the same frozen
+snapshot, case ordering, split, phase limit, model client, and decoding
+configuration; retrieval and updates are disabled for the memory-off run.
+Cases are paired by case_id, never row order. Negative transfer means the
+baseline is correct while memory-on is wrong; ordinary memory-associated errors
+are not called negative transfer.
+
+Phase results include matched counts, positive/negative transfer rates,
+unmatched case IDs, run IDs, deterministic-decoding metadata, and compared case
+IDs. They are written to each phase memory_metrics.json and exposed in top-level
+protocol_results.json. With stochastic decoding, SEMV warns that the estimate
+may include decoding variance and is not a strict causal effect. The snapshot
+hash is checked after both runs.
+
+### Memory configuration migration
+
+The following historical settings are deprecated and no longer control
+behavior:
+
+```yaml
+verification:
+  reject_on_conflict: true
+  contradiction_policy: verified_evidence
+```
+
+The loader accepts and removes either key for backward compatibility and emits a
+deprecation warning. Contradiction-as-conflict-evidence is enforced directly in
+verification and consolidation code.
+
 ## Human Contestation and Adaptive Revision
 
 SEMV is intended to support contestable verification rather than a closed
