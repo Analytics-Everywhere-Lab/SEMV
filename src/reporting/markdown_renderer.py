@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.utils.io import atomic_write_text
+
 from src.schemas.evidence_schema import EvidenceItem
 from src.schemas.report_schema import VerificationReport
 
@@ -106,9 +108,7 @@ class MarkdownRenderer:
         return "\n".join(lines) + "\n"
 
     def render_to_file(self, report: VerificationReport, path: str | Path) -> None:
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(self.render(report), encoding="utf-8")
+        atomic_write_text(path, self.render(report))
 
 
 _MEDIA_SECTIONS = {

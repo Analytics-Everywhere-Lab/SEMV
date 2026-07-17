@@ -6,6 +6,7 @@ from src.schemas.case_schema import MultimediaCase
 from src.schemas.claim_schema import ClaimType, ResearchPlan, SubClaim
 from src.schemas.evidence_schema import EvidenceItem
 from src.schemas.memory_schema import MemoryRecord
+from src.utils.diagnostics import record_fallback
 from src.utils.env_loader import get_bool_env, get_int_env
 from src.utils.llm_client import LLMClient
 
@@ -55,7 +56,8 @@ class ResearchPlanner:
                     claim = futures[future]
                     try:
                         plans[claim.claim_id] = future.result()
-                    except Exception:
+                    except Exception as exc:
+                        record_fallback("research_planning", exc, "deterministic_research_plan", case_id=case.case_id, claim_id=claim.claim_id)
                         plans[claim.claim_id] = self._fallback_plan(case, claim)
 
         for claim in other_claims:
@@ -99,7 +101,8 @@ class ResearchPlanner:
                 used_memory_ids=used_memory_ids,
                 metadata={"used_memory_ids": used_memory_ids},
             )
-        except Exception:
+        except Exception as exc:
+            record_fallback("research_planning", exc, "deterministic_research_plan", case_id=case.case_id, claim_id=claim.claim_id)
             return self._fallback_plan(case, claim)
 
     @staticmethod

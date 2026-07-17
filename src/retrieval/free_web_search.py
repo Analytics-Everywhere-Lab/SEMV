@@ -6,6 +6,7 @@ from src.retrieval.web_article_extractor import WebArticleExtractor
 from src.retrieval.web_image_candidate_extractor import LocalVisualMatcher, WebImageCandidateExtractor
 from src.schemas.claim_schema import ResearchPlan, SubClaim
 from src.schemas.evidence_schema import EvidenceItem, Provenance
+from src.utils.diagnostics import record_fallback
 from src.utils.hashing import stable_hash_text
 from src.utils.io import project_root
 from src.utils.tool_config import retrieval_config
@@ -29,7 +30,8 @@ class FreeWebSearch:
             return []
         try:
             from duckduckgo_search import DDGS
-        except Exception:
+        except Exception as exc:
+            record_fallback("retrieval_adapter", exc, "synthetic_uncertainty_evidence", claim_id=claim.claim_id)
             return [self._uncertainty_item(claim, "free_web_search_unavailable:duckduckgo_search_missing")]
         max_results = int(self.config.get("max_web_results_per_claim", 5))
         search_queries = _dedupe_queries(queries or [" ".join([claim.statement, *plan.search_queries]).strip()])
@@ -58,6 +60,7 @@ class FreeWebSearch:
                     if len(seen_urls) >= max_results:
                         break
         except Exception as exc:
+            record_fallback("retrieval_adapter", exc, "synthetic_uncertainty_evidence", claim_id=claim.claim_id)
             return [self._uncertainty_item(claim, f"free_web_search_failed:{exc.__class__.__name__}")]
         return evidence
 
@@ -73,8 +76,8 @@ class FreeWebSearch:
         article = None
         try:
             article = self.extractor.extract(url)
-        except Exception:
-            pass
+        except Exception as exc:
+            record_fallback("retrieval_adapter", exc, "search_snippet_without_article", claim_id=claim.claim_id)
         title = (article.title if article else result.get("title")) or "Web article candidate"
         body = (article.text if article and article.text else result.get("body", ""))[:1200]
         source_type = _classify_source_type(url, title)

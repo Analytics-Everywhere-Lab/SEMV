@@ -8,6 +8,16 @@ data/evidence_cache_disabled
 data/evidence_cache
 data/outputs
 .ipynb_checkpoints
+**/.ipynb_checkpoints/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+*.tmp
+*.partial
+*.lock.tmp
 data/canonical
 .ignore
 external/TruFor/

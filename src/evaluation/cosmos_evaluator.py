@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 from src.evaluation.calibration_metrics import brier_score, expected_calibration_error
@@ -34,8 +35,12 @@ def evaluate_cosmos(
     limit: int | None = None,
     paired_baseline_case_metrics: list[dict] | None = None,
     include_case_metrics: bool = False,
+    runtime_config=None,
+    artifact_root: str | Path | None = None,
 ) -> dict:
     metadata_path = _resolve(cosmos_metadata)
+    out = _resolve(output_dir)
+    case_artifact_root = Path(artifact_root) if artifact_root is not None else out / "cases"
     if not metadata_path.exists():
         raise FileNotFoundError(f"COSMOS metadata not found: {metadata_path}")
     rows = load_cosmos_rows(metadata_path)
@@ -52,6 +57,7 @@ def evaluate_cosmos(
     pred_labels = []
     y_true = []
     y_prob = []
+    fallback_counts: Counter[str] = Counter()
 
     if update_memory and memory_service is not None and memory_service.frozen:
         raise ValueError("update_memory=True is incompatible with a frozen memory service.")
@@ -76,7 +82,10 @@ def evaluate_cosmos(
             mode=run_mode,
             llm_client=llm_client,
             memory_service=memory_service,
+            runtime_config=runtime_config,
+            artifact_root=case_artifact_root,
         )
+        fallback_counts.update(report.metadata.get("fallback_counts", {}))
         prediction = prediction_from_report(report, "cosmos", "out_of_context_detection")
         predictions.append(prediction.model_dump(mode="json"))
         gold = GoldRecord(
@@ -123,6 +132,7 @@ def evaluate_cosmos(
         "auprc": average_precision(y_true, y_prob),
         "brier_score": brier_score(y_true, y_prob),
         "ece": calibration["ece"] if calibration else None,
+        "fallback_counts": dict(sorted(fallback_counts.items())),
         "abstention_rate": sum(1 for label in binary_pred if label == "abstain") / len(binary_pred),
         "risk_coverage": risk_coverage(y_true, y_prob),
         "confusion_matrix": confusion_matrix(binary_gold, binary_pred),
@@ -133,7 +143,6 @@ def evaluate_cosmos(
         store=memory_service.store if memory_service is not None else None,
         paired_baseline_case_metrics=paired_baseline_case_metrics,
     )
-    out = _resolve(output_dir)
     write_records(out, predictions, gold_records, per_case, aggregate, calibration or {}, mem)
     return evaluation_result(
         aggregate, mem, per_case if include_case_metrics else None

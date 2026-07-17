@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 from src.evaluation.calibration_metrics import expected_calibration_error
@@ -19,8 +20,9 @@ from src.evaluation.report_metrics import report_structure_score
 from src.evaluation.temporal_metrics import publication_event_confusion, temporal_bound_score
 from src.ingestion.mv2026_adapter import MV2026Adapter
 from src.main import run_case_bundle
+from src.reporting.markdown_renderer import MarkdownRenderer
 from src.schemas.evaluation_schema import CaseMetricRecord, GoldRecord
-from src.utils.io import project_root, write_json
+from src.utils.io import project_root
 
 
 def evaluate_mv2026(
@@ -36,8 +38,12 @@ def evaluate_mv2026(
     allow_memory_retrieval: bool = True,
     paired_baseline_case_metrics: list[dict] | None = None,
     include_case_metrics: bool = False,
+    runtime_config=None,
+    artifact_root: str | Path | None = None,
 ) -> dict:
     root = _resolve(raw_root)
+    out = _resolve(output_dir)
+    case_artifact_root = Path(artifact_root) if artifact_root is not None else out / "cases"
     if not root.exists():
         raise FileNotFoundError(f"MV2026 raw root not found: {root}")
     case_dirs = _discover_case_dirs(root)
@@ -59,6 +65,7 @@ def evaluate_mv2026(
     pred_labels = []
     y_true = []
     y_prob = []
+    fallback_counts: Counter[str] = Counter()
 
     if update_memory and memory_service is not None and memory_service.frozen:
         raise ValueError("update_memory=True is incompatible with a frozen memory service.")
@@ -89,7 +96,10 @@ def evaluate_mv2026(
             case_path=case_dir,
             memory_service=memory_service,
             post_prediction_supervision_provider=(provide_post_prediction_gold if update_memory else None),
+            runtime_config=runtime_config,
+            artifact_root=case_artifact_root,
         )
+        fallback_counts.update(report.metadata.get("fallback_counts", {}))
         prediction = prediction_from_report(report, "mv2026", "multimedia_verification")
         predictions.append(prediction.model_dump(mode="json"))
 
@@ -103,8 +113,7 @@ def evaluate_mv2026(
         y_prob.append(binary_probability(report.final_status, report.final_confidence))
 
         evidence_scores = url_f1(set(prediction.predicted_source_urls), set(gold.gold_source_urls))
-        markdown_path = project_root() / "data" / "outputs" / "cases" / bundle.case_id / "report.md"
-        markdown = markdown_path.read_text(encoding="utf-8") if markdown_path.exists() else ""
+        markdown = MarkdownRenderer().render(report)
         metric = CaseMetricRecord(
             case_id=bundle.case_id,
             dataset_name="mv2026",
@@ -132,6 +141,7 @@ def evaluate_mv2026(
         "correct_abstention_rate": _correct_abstention_rate(gold_labels, pred_labels),
         "confusion_matrix": confusion_matrix(gold_labels, pred_labels),
         "ece": calibration["ece"] if calibration else None,
+        "fallback_counts": dict(sorted(fallback_counts.items())),
     }
     mem = memory_metrics(
         predictions,
@@ -139,7 +149,6 @@ def evaluate_mv2026(
         store=memory_service.store if memory_service is not None else None,
         paired_baseline_case_metrics=paired_baseline_case_metrics,
     )
-    out = _resolve(output_dir)
     write_records(out, predictions, gold_records, per_case, aggregate, calibration or {}, mem)
     return evaluation_result(
         aggregate, mem, per_case if include_case_metrics else None

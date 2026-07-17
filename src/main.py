@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from src.aggregation.final_decision_aggregator import FinalDecisionAggregator
+from src.config.runtime import PipelineRuntimeConfig, load_runtime_config
 from src.contestation.adaptive_revision_executor import execute_adaptive_revision
 from src.contestation.contestation_applier import apply_human_contestations, contestation_summary
 from src.contestation.revision_router import route_revision
@@ -45,8 +46,9 @@ from src.schemas.evidence_schema import EvidenceGraph, EvidenceItem
 from src.schemas.memory_schema import MemoryRecord
 from src.schemas.qbaf_schema import QBAFGraph
 from src.schemas.report_schema import SubClaimReport, VerificationReport
+from src.utils.diagnostics import diagnostic_counts, diagnostic_events, start_diagnostics
 from src.utils.env_loader import get_bool_env, get_int_env
-from src.utils.io import project_root, read_json, write_json
+from src.utils.io import atomic_write_text, project_root, read_json, read_yaml, write_json
 from src.utils.llm_client import LLMClient, build_llm_client
 from src.utils.tool_config import load_tools_config
 
@@ -70,6 +72,8 @@ def run_case_bundle(
     exclude_rejected_arguments: bool = True,
     memory_service: MemoryService | None = None,
     post_prediction_supervision_provider: Callable[[], str | dict | None] | None = None,
+    runtime_config: PipelineRuntimeConfig | None = None,
+    artifact_root: str | Path | None = None,
 ) -> VerificationReport:
     if mode not in {"inference_only", "self_evolving", "test", "bootstrap_memory"}:
         raise ValueError("mode must be inference_only, self_evolving, test, or bootstrap_memory")
@@ -81,7 +85,12 @@ def run_case_bundle(
         )
 
     assert_no_gold_leakage(bundle, mode)
-    shared_llm_client = llm_client or build_llm_client()
+    start_diagnostics(bundle.case_id)
+    runtime = runtime_config or load_runtime_config(config_path)
+    resolved_artifact_root = (Path(artifact_root) if artifact_root is not None
+                              else _configured_case_artifact_root(config_path))
+    features = runtime.features
+    shared_llm_client = llm_client or build_llm_client(config_path=config_path)
     legacy_case = case_bundle_to_multimedia_case(bundle)
     tools_config = load_tools_config(config_path)
 
@@ -101,13 +110,16 @@ def run_case_bundle(
         llm_client=shared_llm_client,
         frozen=mode in {"inference_only", "test"},
     )
-    if bundle.run_config.allow_memory_retrieval:
+    memory_enabled = bundle.run_config.allow_memory_retrieval and features.use_memory
+    if memory_enabled:
         memory_by_claim = shared_memory_service.retrieve_for_claims(
             bundle=bundle,
             claims=bundle.claims or [],
             evidence=raw_evidence,
             source_clusters=bundle.source_clusters,
             include_short_term=mode in {"bootstrap_memory", "self_evolving"},
+            top_k=runtime.memory_top_k,
+            memory_types=list(features.memory_types),
         )
         if not memory_by_claim:
             memory_by_claim = {
@@ -115,6 +127,8 @@ def run_case_bundle(
                     case=legacy_case,
                     claim=claim,
                     evidence=raw_evidence,
+                    top_k=runtime.memory_top_k,
+                    memory_types=list(features.memory_types),
                 )
                 for claim in claims
             }
@@ -175,6 +189,7 @@ def run_case_bundle(
         clash_resolver=clash_resolver,
         decision_mapper=decision_mapper,
         exclude_rejected_arguments=exclude_rejected_arguments,
+        runtime_config=runtime,
     )
     for scored_arguments, graph, subclaim_report in claim_results:
         all_arguments.extend(scored_arguments)
@@ -188,13 +203,14 @@ def run_case_bundle(
     memory_retrieved = _flatten_memory(memory_by_claim.values())
     used_memory_ids = _collect_used_memory_ids(research_plans, all_arguments)
     memory_used = [record for record in memory_retrieved if record.memory_id in used_memory_ids]
-    _log_memory_usage(
-        service=shared_memory_service,
-        bundle=bundle,
-        memory_by_claim=memory_by_claim,
-        research_plans=research_plans,
-        arguments=all_arguments,
-    )
+    if memory_enabled:
+        _log_memory_usage(
+            service=shared_memory_service,
+            bundle=bundle,
+            memory_by_claim=memory_by_claim,
+            research_plans=research_plans,
+            arguments=all_arguments,
+        )
     logger.info("[7/8] Uncertainty escalation")
     logger.info("[8/8] Report rendering")
     report = ReportGenerator(llm_client=shared_llm_client).generate(
@@ -218,6 +234,7 @@ def run_case_bundle(
                 "source_identity": _source_identity(bundle),
                 "gold_visibility": bundle.gold.gold_visibility,
                 "used_memory_ids": sorted(used_memory_ids),
+                "runtime_configuration": runtime.model_dump(mode="json"),
             }
         }
     )
@@ -244,7 +261,9 @@ def run_case_bundle(
             current_arguments=all_arguments,
             case_trace=pre_trace,
         )
-        use_adaptive_revision = True if enable_adaptive_revision is None else enable_adaptive_revision
+        use_adaptive_revision = features.adaptive_revision and (
+            True if enable_adaptive_revision is None else enable_adaptive_revision
+        )
         if not use_adaptive_revision:
             reviewed_arguments = apply_human_contestations(all_arguments, review_batch)
             report, qbaf_graphs, all_arguments = _rerun_qbaf_and_report(
@@ -275,6 +294,8 @@ def run_case_bundle(
                 llm_client=shared_llm_client,
                 exclude_rejected_arguments=exclude_rejected_arguments,
                 memory_retriever=shared_memory_service.retriever,
+                memory_top_k=runtime.memory_top_k,
+                memory_types=list(features.memory_types),
             )
         contestation_diff = _contestation_diff(
             original_report=report_before_contestation,
@@ -327,6 +348,11 @@ def run_case_bundle(
         )
         if isinstance(supervision, dict):
             supervision = supervision.get("gold_final_label") or supervision.get("label")
+        if (supervision is not None and not shared_memory_service.frozen
+                and str(bundle.dataset.dataset_split or "").lower() in {"train", "training"}):
+            _log_supervised_memory_outcomes(
+                shared_memory_service, bundle, all_arguments, report.final_status, supervision
+            )
         # Gold is only revealed here, after the report (prediction) exists.
         # Only training/bootstrap runs may stage short-term memory; a frozen
         # memory service (validation/test snapshots) never updates.
@@ -355,6 +381,11 @@ def run_case_bundle(
         report.reflection_logs = [reflection]
         report.memory_update_candidates = candidates
 
+    fallback_events = diagnostic_events()
+    report = report.model_copy(update={"metadata": {
+        **report.metadata, "fallback_diagnostics": fallback_events,
+        "fallback_counts": diagnostic_counts(),
+    }})
     _save_case_outputs(
         bundle=bundle,
         raw_evidence=raw_evidence,
@@ -370,6 +401,7 @@ def run_case_bundle(
         revision_plan=revision_plan,
         report_before_contestation=report_before_contestation,
         contestation_diff=contestation_diff,
+        output_dir=resolved_artifact_root / bundle.case_id,
     )
     return report
 
@@ -386,6 +418,7 @@ def run_case(
     enable_adaptive_revision: bool | None = None,
     exclude_rejected_arguments: bool = True,
     config_path: str = "configs/default.yaml",
+    artifact_root: str | Path | None = None,
 ) -> VerificationReport:
     bundle = multimedia_case_to_case_bundle(case)
     if ground_truth_label or subclaim_labels:
@@ -399,7 +432,7 @@ def run_case(
                 )
             }
         )
-    del human_feedback
+    review_batch = _legacy_human_feedback_batch(case.case_id, human_feedback)
     return run_case_bundle(
         bundle=bundle,
         mode=mode,
@@ -407,8 +440,10 @@ def run_case(
         llm_client=llm_client,
         case_path=case_path,
         human_review_path=human_review_path,
+        human_review_batch=review_batch,
         enable_adaptive_revision=enable_adaptive_revision,
         exclude_rejected_arguments=exclude_rejected_arguments,
+        artifact_root=artifact_root,
     )
 
 
@@ -560,6 +595,29 @@ def _research_plans_from_trace(previous_state: CaseTrace) -> dict[str, ResearchP
         claim_id: item if isinstance(item, ResearchPlan) else ResearchPlan.model_validate(item)
         for claim_id, item in stored.items()
     }
+
+
+def _legacy_human_feedback_batch(
+    case_id: str, human_feedback: dict | None,
+) -> HumanReviewBatch | None:
+    if human_feedback is None:
+        return None
+    if not isinstance(human_feedback, dict) or not human_feedback:
+        raise ValueError(
+            "human_feedback must be a non-empty HumanReviewBatch dictionary or None"
+        )
+    payload = human_feedback.get("human_review_batch", human_feedback)
+    if not isinstance(payload, dict):
+        raise ValueError("human_feedback.human_review_batch must be a dictionary")
+    payload = {**payload, "case_id": payload.get("case_id") or case_id}
+    try:
+        return HumanReviewBatch.model_validate(payload)
+    except Exception as exc:
+        raise ValueError(
+            "Unsupported legacy human_feedback; expected HumanReviewBatch fields "
+            "(case_id, reviewer_id, contestations, global_comment, metadata). "
+            f"Validation failed: {exc}"
+        ) from exc
 
 
 def _load_human_review_batch(
@@ -749,6 +807,7 @@ def _process_claims_parallel(
     clash_resolver: ClashResolver,
     decision_mapper: DecisionMapper,
     exclude_rejected_arguments: bool = True,
+    runtime_config: PipelineRuntimeConfig | None = None,
 ) -> list[tuple[list[Argument], QBAFGraph, SubClaimReport]]:
     max_workers = _max_parallel_claim_workers(len(claims))
     if max_workers <= 1:
@@ -768,6 +827,7 @@ def _process_claims_parallel(
                 clash_resolver=clash_resolver,
                 decision_mapper=decision_mapper,
                 exclude_rejected_arguments=exclude_rejected_arguments,
+                runtime_config=runtime_config,
             )
             for claim in claims
         ]
@@ -791,6 +851,7 @@ def _process_claims_parallel(
                 clash_resolver=clash_resolver,
                 decision_mapper=decision_mapper,
                 exclude_rejected_arguments=exclude_rejected_arguments,
+                runtime_config=runtime_config,
             ): claim
             for claim in claims
         }
@@ -816,24 +877,28 @@ def _process_claim(
     clash_resolver: ClashResolver,
     decision_mapper: DecisionMapper,
     exclude_rejected_arguments: bool = True,
+    runtime_config: PipelineRuntimeConfig | None = None,
 ) -> tuple[list[Argument], QBAFGraph, SubClaimReport]:
+    runtime = runtime_config or PipelineRuntimeConfig()
+    features = runtime.features
     claim_evidence = evidence_ranker.select_for_claim(
         claim=claim,
         evidence=normalized_evidence,
         evidence_graph=evidence_graph,
-        top_k=10,
+        top_k=runtime.evidence_top_k,
     )
     arguments = argument_generator.generate(
         claim=claim,
         evidence=claim_evidence,
         evidence_graph=evidence_graph,
         memory_items=memory_by_claim.get(claim.claim_id, []),
+        case_id=bundle.case_id,
     )
-    verified_arguments = argument_verifier.verify_all(
-        claim=claim,
-        arguments=arguments,
-        evidence=claim_evidence,
-        bundle=bundle,
+    verified_arguments = (
+        argument_verifier.verify_all(
+            claim=claim, arguments=arguments, evidence=claim_evidence, bundle=bundle
+        )
+        if features.argument_verifier else arguments
     )
     scored_arguments = argument_scorer.score_all(
         claim=claim,
@@ -842,8 +907,17 @@ def _process_claim(
         evidence_graph=evidence_graph,
         bundle=bundle,
     )
-    graph = propagator.propagate(graph_builder.build(claim=claim, arguments=scored_arguments, exclude_rejected_arguments=exclude_rejected_arguments))
-    if clash_resolver.should_resolve(graph, scored_arguments):
+    if features.use_qbaf:
+        graph = propagator.propagate(graph_builder.build(
+            claim=claim, arguments=scored_arguments,
+            exclude_rejected_arguments=exclude_rejected_arguments,
+        ))
+    else:
+        graph = _non_qbaf_graph(
+            claim, scored_arguments, graph_builder, exclude_rejected_arguments
+        )
+    if (features.use_qbaf and features.clash_resolution
+            and clash_resolver.should_resolve(graph, scored_arguments)):
         scored_arguments = clash_resolver.resolve(
             claim=claim,
             graph=graph,
@@ -862,6 +936,27 @@ def _process_claim(
 
     subclaim_report = decision_mapper.to_subclaim_report(claim, graph, scored_arguments)
     return scored_arguments, graph, subclaim_report
+
+
+def _non_qbaf_graph(
+    claim: SubClaim, arguments: list[Argument], graph_builder: QBAFGraphBuilder,
+    exclude_rejected_arguments: bool,
+) -> QBAFGraph:
+    """Deterministic Laplace-smoothed support/attack weighted mean baseline."""
+    graph = graph_builder.build(
+        claim=claim, arguments=arguments,
+        exclude_rejected_arguments=exclude_rejected_arguments,
+    )
+    support = sum((row.score or row.intrinsic_score) for row in arguments if row.stance == "support")
+    attack = sum((row.score or row.intrinsic_score) for row in arguments if row.stance == "attack")
+    score = (1.0 + support) / (2.0 + support + attack)
+    claim_node = graph.nodes.get(claim.claim_id)
+    if claim_node is not None:
+        graph.nodes[claim.claim_id] = claim_node.model_copy(update={"final_score": score})
+    return graph.model_copy(update={
+        "claim_score": score,
+        "metadata": {**graph.metadata, "aggregation": "non_qbaf_laplace_weighted_mean"},
+    })
 
 
 def _max_parallel_claim_workers(claim_count: int) -> int:
@@ -966,6 +1061,12 @@ def _claims_from_bundle(bundle: CaseBundle) -> list[SubClaim]:
     return subclaims
 
 
+def _configured_case_artifact_root(config_path: str | Path) -> Path:
+    paths = read_yaml(config_path).get("paths") or {}
+    output = Path(paths.get("outputs_dir", "data/outputs")) / "cases"
+    return output if output.is_absolute() else project_root() / output
+
+
 def _save_case_outputs(
     bundle: CaseBundle,
     raw_evidence: list[EvidenceItem],
@@ -981,8 +1082,9 @@ def _save_case_outputs(
     revision_plan=None,
     report_before_contestation: VerificationReport | None = None,
     contestation_diff: dict[str, Any] | None = None,
+    output_dir: Path | None = None,
 ) -> None:
-    output_dir = project_root() / "data" / "outputs" / "cases" / bundle.case_id
+    output_dir = output_dir or project_root() / "data" / "outputs" / "cases" / bundle.case_id
     write_json(output_dir / "input_case_bundle.json", bundle)
     write_json(output_dir / "raw_evidence.json", raw_evidence)
     write_json(output_dir / "normalized_evidence.json", normalized_evidence)
@@ -991,6 +1093,7 @@ def _save_case_outputs(
     write_json(output_dir / "arguments.json", arguments)
     write_json(output_dir / "qbaf_graphs.json", qbaf_graphs)
     write_json(output_dir / "retrieved_memory.json", memory_by_claim)
+    write_json(output_dir / "fallback_diagnostics.json", report.metadata.get("fallback_diagnostics", []))
     if save_case_trace:
         trace = _build_case_trace(
             bundle=bundle,
@@ -1017,11 +1120,11 @@ def _save_case_outputs(
     write_json(output_dir / "reflection_candidates.json", report.memory_update_candidates)
     write_json(output_dir / "verified_memory_updates.json", report.memory_updates_applied)
     write_json(output_dir / "staged_memory_updates.json", report.memory_updates_staged)
-    (output_dir / "run_log.txt").write_text(
+    atomic_write_text(
+        output_dir / "run_log.txt",
         "gold_read_before_prediction=false\n"
         f"final_status={report.final_status}\n"
         f"final_confidence={report.final_confidence}\n",
-        encoding="utf-8",
     )
 
 
@@ -1121,12 +1224,31 @@ def _log_memory_usage(
                     stage="argument_cited",
                     claim_id=argument.claim_id,
                     argument_id=argument.argument_id,
-                    outcome="successful" if argument.verifier_valid is True else "unknown",
+                    outcome="grounded" if argument.verifier_valid is True else "unknown",
                     dataset_name=dataset_name,
                     dataset_split=dataset_split,
                 )
     except Exception:
         logger.warning("Memory usage logging failed for case %s", bundle.case_id, exc_info=True)
+
+
+def _log_supervised_memory_outcomes(
+    service: MemoryService, bundle: CaseBundle, arguments: list[Argument],
+    prediction: str, supervision: str,
+) -> None:
+    from src.evaluation.label_normalizer import normalize_cosmos_label, normalize_mv2026_label
+
+    normalize = (normalize_cosmos_label if bundle.dataset.dataset_name == "cosmos"
+                 else normalize_mv2026_label)
+    outcome = "successful" if normalize(prediction) == normalize(supervision) else "unsuccessful"
+    for argument in arguments:
+        for memory_id in argument.metadata.get("used_memory_ids", []) or []:
+            service.log_usage(
+                case_id=bundle.case_id, memory_id=memory_id, stage="argument_cited",
+                claim_id=argument.claim_id, argument_id=argument.argument_id, outcome=outcome,
+                dataset_name=bundle.dataset.dataset_name,
+                dataset_split=bundle.dataset.dataset_split, protocol_phase="training",
+            )
 
 
 def _log_contested_memory_usage(

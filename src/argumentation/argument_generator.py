@@ -7,6 +7,7 @@ from src.schemas.claim_schema import SubClaim
 from src.schemas.contestation_schema import ArgumentProvenance
 from src.schemas.evidence_schema import EvidenceGraph, EvidenceItem
 from src.schemas.memory_schema import MemoryRecord
+from src.utils.diagnostics import record_fallback
 from src.utils.hashing import stable_hash_text
 from src.utils.llm_client import LLMClient
 
@@ -77,6 +78,7 @@ class ArgumentGenerator:
         evidence: list[EvidenceItem],
         evidence_graph: EvidenceGraph,
         memory_items: list[MemoryRecord],
+        case_id: str | None = None,
     ) -> list[Argument]:
         del evidence_graph
         memory_lines = [f"[{item.memory_id}] {item.text}" for item in memory_items[:3]]
@@ -126,8 +128,8 @@ class ArgumentGenerator:
                 arguments.append(argument)
             if arguments:
                 return arguments
-        except Exception:
-            pass
+        except Exception as exc:
+            record_fallback("argument_generation", exc, "evidence_direct_arguments", case_id=case_id, claim_id=claim.claim_id)
         return self._fallback_arguments(claim, evidence)
 
     def _fallback_arguments(self, claim: SubClaim, evidence: list[EvidenceItem]) -> list[Argument]:

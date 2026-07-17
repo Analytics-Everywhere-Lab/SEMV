@@ -70,6 +70,7 @@ class MemoryRecord(BaseModel):
     usage_count: int = 0
     successful_usage_count: int = 0
     contested_usage_count: int = 0
+    unsuccessful_usage_count: int = 0
     last_used_at: str | None = None
     last_confirmed_at: str | None = None
     created_at: datetime | str | None = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -250,7 +251,7 @@ class MemoryUsageEvent(BaseModel):
     stage: Literal["retrieved", "planner_cited", "argument_cited"]
     claim_id: str | None = None
     argument_id: str | None = None
-    outcome: Literal["successful", "contested", "unknown"] = "unknown"
+    outcome: Literal["successful", "unsuccessful", "contested", "grounded", "unknown"] = "unknown"
     dataset_name: str | None = None
     dataset_split: str | None = None
     frozen: bool = False

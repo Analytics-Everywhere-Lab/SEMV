@@ -162,7 +162,7 @@ class MemoryVerifier:
             f"Candidate: {candidate.text}\n"
             f"Trigger: {candidate.trigger_pattern or ''}\n"
             f"Recommended action: {candidate.recommended_action or ''}\n"
-            f"Rationale: {candidate.rationale or ""}\n"
+            f"Rationale: {candidate.rationale or ''}\n"
             f"Grounding summaries: {candidate.grounding}"
         )
         try:

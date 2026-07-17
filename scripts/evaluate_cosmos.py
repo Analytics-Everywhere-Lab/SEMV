@@ -9,6 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.config.runtime import load_runtime_config
 from src.evaluation.cosmos_evaluator import evaluate_cosmos
 from src.utils.llm_client import LoggingLLMClient, build_llm_client
 
@@ -36,7 +37,8 @@ def main() -> None:
         args.mode,
         args.split,
     )
-    llm_client = LoggingLLMClient(build_llm_client(), logger_name="llm.output")
+    runtime = load_runtime_config(args.config)
+    llm_client = LoggingLLMClient(build_llm_client(config_path=args.config), logger_name="llm.output")
 
     result = evaluate_cosmos(
         args.cosmos_metadata,
@@ -45,6 +47,7 @@ def main() -> None:
         args.mode,
         args.split,
         llm_client=llm_client,
+        runtime_config=runtime,
     )
     print(result)
 

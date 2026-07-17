@@ -6,6 +6,7 @@ from pathlib import Path
 
 from src.schemas.case_schema import MediaItem
 from src.schemas.evidence_schema import EvidenceItem, Provenance
+from src.utils.diagnostics import record_fallback
 from src.utils.hashing import stable_hash_text
 from src.utils.tool_config import media_config
 
@@ -42,6 +43,7 @@ class ASRExtractor:
         try:
             subprocess.run(command, check=True, capture_output=True, text=True, timeout=60)
         except Exception as exc:
+            record_fallback("asr_adapter", exc, "synthetic_uncertainty_evidence")
             return [self._uncertainty_item(media, f"ffmpeg_audio_extract_failed:{exc.__class__.__name__}")]
         if not audio_path.exists() or audio_path.stat().st_size == 0:
             return [self._uncertainty_item(media, "no_audio_stream")]
@@ -52,6 +54,7 @@ class ASRExtractor:
             segments, info = model.transcribe(str(audio_path), word_timestamps=True, language=language)
             segment_list = list(segments)
         except Exception as exc:  # pragma: no cover - model/runtime dependent
+            record_fallback("asr_adapter", exc, "synthetic_uncertainty_evidence")
             return [self._uncertainty_item(media, f"asr_adapter_unavailable:{exc.__class__.__name__}")]
 
         texts = [getattr(segment, "text", "").strip() for segment in segment_list if getattr(segment, "text", "").strip()]

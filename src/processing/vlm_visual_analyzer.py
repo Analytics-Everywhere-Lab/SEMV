@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Iterable
 
 from src.schemas.evidence_schema import EvidenceItem, Provenance
+from src.utils.diagnostics import record_fallback
 from src.utils.hashing import stable_hash_text
 from src.utils.llm_client import LLMClient, build_llm_client
 from src.utils.tool_config import media_config
@@ -25,7 +26,6 @@ class VLMVisualAnalyzer:
         context: str | None = None,
         case_id: str = "",
     ) -> list[EvidenceItem]:
-        del case_id
         paths = [Path(path) for path in image_paths or []]
         if not paths:
             return []
@@ -45,6 +45,7 @@ class VLMVisualAnalyzer:
             try:
                 data = self._vllm_generate(path, claim, context)
             except Exception as exc:  # pragma: no cover - local vLLM availability varies
+                record_fallback("vlm_adapter", exc, "synthetic_uncertainty_evidence", case_id=case_id)
                 evidence.append(self._uncertainty_item(path, f"vlm_adapter_failed:{exc.__class__.__name__}"))
                 continue
             evidence.extend(self._items_for_analysis(path, data))

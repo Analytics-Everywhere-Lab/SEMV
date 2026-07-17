@@ -16,8 +16,12 @@ def main() -> None:
     parser.add_argument("--config", default="configs/evaluation.yaml")
     parser.add_argument("--protocol", default=None)
     parser.add_argument("--output-dir", default="data/outputs/evaluation/joint_mv_cosmos")
+    parser.add_argument("--ablation-variant", choices=[f"A{i}" for i in range(11)] + ["all"], default=None)
     args = parser.parse_args()
-    result = run_protocol(args.config, args.protocol, args.output_dir)
+    result = run_protocol(
+        args.config, args.protocol, args.output_dir,
+        ablation_variant=args.ablation_variant,
+    )
     print(result)
 
 

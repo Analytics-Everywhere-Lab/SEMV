@@ -34,7 +34,8 @@ class MemoryRetriever:
         self.similarity = similarity or build_similarity_backend(self.config)
 
     def retrieve(
-        self, case: MultimediaCase, claim: SubClaim, evidence: list[EvidenceItem], top_k: int | None = None
+        self, case: MultimediaCase, claim: SubClaim, evidence: list[EvidenceItem],
+        top_k: int | None = None, memory_types: list[str] | None = None,
     ) -> list[MemoryRecord]:
         query_text = " ".join(
             str(part) for part in [case.claim, case.context or "", claim.claim_type, claim.statement] if part
@@ -46,11 +47,12 @@ class MemoryRetriever:
             "subtask": None,
             "scope_type": claim.metadata.get("scope_type") if claim.metadata else None,
         }
-        return self._retrieve_ranked(query, evidence, top_k)
+        return self._retrieve_ranked(query, evidence, top_k, memory_types=memory_types)
 
     def retrieve_for_claims(
         self, bundle, claims, evidence, source_clusters=None, top_k: int | None = None,
         extra_records: list[MemoryRecord] | None = None,
+        memory_types: list[str] | None = None,
     ) -> dict[str, list[MemoryRecord]]:
         del source_clusters
         results = {}
@@ -65,19 +67,23 @@ class MemoryRetriever:
                     " ".join(query.get("geolocation_cues") or []),
                 ] if part
             )
-            results[claim.claim_id] = self._retrieve_ranked(query, evidence, top_k, extra_records)
+            results[claim.claim_id] = self._retrieve_ranked(
+                query, evidence, top_k, extra_records, memory_types=memory_types
+            )
         return results
 
     def _retrieve_ranked(
         self, query: dict, evidence: list[EvidenceItem], top_k: int | None,
         extra_records: list[MemoryRecord] | None = None,
+        memory_types: list[str] | None = None,
     ) -> list[MemoryRecord]:
         cfg = self.config.retrieval
         limit = top_k if top_k is not None else cfg.top_k
         statuses = ["active"] if cfg.active_only else None
-        records = self.store.load_long_term(list(cfg.include_memory_types), statuses)
+        selected_types = list(cfg.include_memory_types) if memory_types is None else memory_types
+        records = self.store.load_long_term(selected_types, statuses)
         if extra_records:
-            records += [row for row in extra_records if row.memory_type in cfg.include_memory_types]
+            records += [row for row in extra_records if row.memory_type in selected_types]
         context = self._evidence_context(evidence)
         scored: list[tuple[float, MemoryRecord, dict[str, float]]] = []
         for record in records:
@@ -171,7 +177,8 @@ class MemoryRetriever:
         ))
         confidence = record.confidence
         support = min(1.0, record.independent_support() / 5.0)
-        usage_denominator = record.successful_usage_count + record.contested_usage_count
+        usage_denominator = (record.successful_usage_count + record.unsuccessful_usage_count
+                             + record.contested_usage_count)
         usage = record.successful_usage_count / usage_denominator if usage_denominator else 0.0
         final = (
             SCORE_WEIGHTS["similarity"] * semantic

@@ -17,6 +17,14 @@ This repository is organized as research code for running single-case inference,
 canonical dataset conversion, memory-enabled ablations, and MV2026/COSMOS-style
 evaluation protocols.
 
+Supported Python versions are 3.11 through 3.13. Core installation uses
+`pip install -c constraints.txt -e .`; test and static-check dependencies use
+`pip install -c constraints.txt -e '.[dev]'`. Media, retrieval, and deep
+forensics dependencies are optional extras so core tests do not require heavy
+models. The constraints file is the compatibility strategy; deployments should
+compile it to a platform-specific lock file when exact transitive pins are
+required.
+
 ## Method Overview
 
 For each case, the pipeline performs the following stages:
@@ -929,6 +937,21 @@ fail-closed, and stages the survivors into STM.
 > rejected as ungrounded.
 
 ## Reproducibility Notes
+
+Static evaluation must configure `evaluation.protocol.frozen_memory_snapshot`
+(or `memory_source_dir`). Its manifest and state hash are verified before and
+after evaluation; frozen usage telemetry is routed only to the evaluation
+output. An intentionally empty snapshot additionally requires
+`allow_empty_memory: true`.
+
+The `ablations` protocol executes A0-A10, or one variant selected with
+`scripts/run_protocol.py --ablation-variant A6`. Every condition has an
+isolated artifact directory and immutable feature configuration. With QBAF
+disabled, claim scores use the deterministic Laplace-smoothed baseline
+`(1 + support_strength) / (2 + support_strength + attack_strength)`.
+
+`scripts/evaluate_mv2026.py` no longer accepts the previously unused
+`--canonical-root`; use `scripts/convert_case.py` for canonical conversion.
 
 - Local LLM behavior depends on the configured vLLM model and decoding
   parameters.

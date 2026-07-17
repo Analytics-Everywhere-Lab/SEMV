@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from src.schemas.evidence_schema import EvidenceItem, Provenance
+from src.utils.diagnostics import record_fallback
 from src.utils.hashing import stable_hash_text
 from src.utils.io import project_root
 from src.utils.tool_config import retrieval_config
@@ -188,8 +189,8 @@ class GeolocationCandidateExtractor:
                 cache[name] = result
                 self._save_cache(cache)
                 return result["lat"], result["lon"]
-        except Exception:
-            pass
+        except Exception as exc:
+            record_fallback("geolocation_extraction", exc, "cached_miss_no_coordinates")
         cache[name] = None
         self._save_cache(cache)
         return None

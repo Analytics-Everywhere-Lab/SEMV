@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.schemas.argument_schema import Argument
 from src.schemas.claim_schema import SubClaim
 from src.schemas.evidence_schema import EvidenceItem
+from src.utils.diagnostics import record_fallback
 from src.utils.env_loader import get_bool_env, get_int_env
 from src.utils.llm_client import LLMClient
 
@@ -44,7 +45,8 @@ class ArgumentVerifier:
             return argument.model_copy(
                 update={"verifier_valid": valid, "verification_notes": notes}
             )
-        except Exception:
+        except Exception as exc:
+            record_fallback("argument_verification", exc, "fail_closed_rejection", claim_id=claim.claim_id)
             return argument.model_copy(update={
                 "verifier_valid": False,
                 "verification_notes": "Argument verifier unavailable or malformed; failed closed.",

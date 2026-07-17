@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -37,11 +38,17 @@ def to_jsonable(value: Any) -> Any:
     return value
 
 
-def write_json(path: str | Path, data: Any) -> None:
+def atomic_write_text(path: str | Path, text: str) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, target)
+
+
+def write_json(path: str | Path, data: Any) -> None:
     text = json.dumps(to_jsonable(data), indent=2, ensure_ascii=False)
-    target.write_text(text + "\n", encoding="utf-8")
+    atomic_write_text(path, text + "\n")
 
 
 def read_yaml(path: str | Path) -> dict[str, Any]:

@@ -7,6 +7,7 @@ from typing import Iterable
 
 from src.schemas.case_schema import MediaItem
 from src.schemas.evidence_schema import EvidenceItem, Provenance
+from src.utils.diagnostics import record_fallback
 from src.utils.hashing import stable_hash_text
 from src.utils.tool_config import media_config
 
@@ -33,6 +34,7 @@ class OCRExtractor:
         try:
             reader = self._get_reader()
         except Exception as exc:
+            record_fallback("ocr_adapter", exc, "synthetic_uncertainty_evidence", case_id=case_id)
             flag = f"ocr_adapter_unavailable:{exc.__class__.__name__}"
             return [self._uncertainty_item(path, flag) for path in paths]
 
@@ -51,6 +53,7 @@ class OCRExtractor:
             try:
                 results = reader.readtext(str(path))
             except Exception as exc:  # pragma: no cover - engine/runtime dependent
+                record_fallback("ocr_adapter", exc, "synthetic_uncertainty_evidence", case_id=case_id)
                 groups[f"failed:{path}"] = {
                     "text": "",
                     "paths": [path],

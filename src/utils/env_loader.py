@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 
 
@@ -34,6 +35,10 @@ def get_int_env(name: str, default: int) -> int:
     try:
         return int(value)
     except ValueError:
+        warnings.warn(
+            f"Invalid integer environment override {name}={value!r}; using {default}.",
+            RuntimeWarning, stacklevel=2,
+        )
         return default
 
 

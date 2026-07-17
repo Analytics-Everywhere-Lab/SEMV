@@ -10,6 +10,7 @@ from typing import Any, Protocol
 import requests
 
 from src.utils.env_loader import load_env_file
+from src.utils.io import read_yaml
 
 
 class LLMClient(Protocol):
@@ -45,21 +46,22 @@ logger = logging.getLogger("run_case")
 class VLLMOpenAIClient:
     """Shared vLLM OpenAI-compatible client used by all SEMV agent components."""
 
-    def __init__(self, env_path: str | None = None) -> None:
+    def __init__(self, env_path: str | None = None, settings: dict | None = None) -> None:
         load_env_file(env_path)
-        self.base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1").rstrip("/")
+        settings = settings or {}
+        self.base_url = str(settings.get("base_url") or os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")).rstrip("/")
         self.api_key = os.getenv("VLLM_API_KEY", "EMPTY")
-        self.model = os.getenv("VLLM_MODEL")
+        self.model = settings.get("model") or os.getenv("VLLM_MODEL")
 
         if not self.model or self.model == "your_model_name_here":
             raise ValueError(
                 "VLLM_MODEL must be set in .env, e.g. VLLM_MODEL=Qwen/Qwen3.5-9B."
             )
 
-        self.temperature = float(os.getenv("VLLM_TEMPERATURE", "0.0"))
-        self.top_p = float(os.getenv("VLLM_TOP_P", "1.0"))
-        self.top_k = int(os.getenv("VLLM_TOP_K", "20"))
-        self.max_tokens = int(os.getenv("VLLM_MAX_TOKENS", "4096"))
+        self.temperature = float(settings.get("temperature", os.getenv("VLLM_TEMPERATURE", "0.0")))
+        self.top_p = float(settings.get("top_p", os.getenv("VLLM_TOP_P", "1.0")))
+        self.top_k = int(settings.get("top_k", os.getenv("VLLM_TOP_K", "20")))
+        self.max_tokens = int(settings.get("max_tokens", os.getenv("VLLM_MAX_TOKENS", "4096")))
         self.timeout = float(os.getenv("VLLM_TIMEOUT", "120"))
         self.enable_thinking = _env_bool("VLLM_ENABLE_THINKING", False)
 
@@ -268,11 +270,19 @@ class LoggingLLMClient:
         )
 
 
-def build_llm_client(env_path: str | None = None) -> LLMClient:
-    provider = os.getenv("SEMV_LLM_PROVIDER", "vllm").strip().lower()
+def build_llm_client(
+    env_path: str | None = None, config_path: str | Path | None = None,
+) -> LLMClient:
+    config = read_yaml(config_path) if config_path else {}
+    llm = dict(config.get("llm") or {})
+    provider = os.getenv("SEMV_LLM_PROVIDER", str(llm.get("provider", "vllm"))).strip().lower()
     if provider != "vllm":
-        raise ValueError(f"Unsupported SEMV_LLM_PROVIDER={provider!r}. Use 'vllm'.")
-    return VLLMOpenAIClient(env_path=env_path)
+        raise ValueError(f"Unsupported LLM provider {provider!r}. Use 'vllm'.")
+    use_env_model = bool(llm.pop("use_env_model_name", True))
+    llm.pop("provider", None)
+    if use_env_model:
+        llm.pop("model", None)
+    return VLLMOpenAIClient(env_path=env_path, settings=llm)
 
 
 def _env_bool(name: str, default: bool) -> bool:

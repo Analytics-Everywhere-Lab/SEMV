@@ -311,6 +311,8 @@ def execute_adaptive_revision(
     llm_client: LLMClient,
     exclude_rejected_arguments: bool = True,
     memory_retriever: MemoryRetriever | None = None,
+    memory_top_k: int = 5,
+    memory_types: list[str] | None = None,
 ) -> tuple[VerificationReport, list[QBAFGraph], list[Argument], list[EvidenceItem], EvidenceGraph]:
     from src.main import _research_claims_parallel, _merge_dedup_evidence
 
@@ -340,6 +342,8 @@ def execute_adaptive_revision(
             reviewed_arguments=reviewed_arguments,
             research_plans=research_plans,
             memory_retriever=memory_retriever,
+            memory_top_k=memory_top_k,
+            memory_types=memory_types,
             revision_plan=revision_plan,
             llm_client=llm_client,
             exclude_rejected_arguments=exclude_rejected_arguments,
@@ -552,6 +556,8 @@ def _rerun_from_claim_decomposition(
     llm_client: LLMClient,
     exclude_rejected_arguments: bool,
     memory_retriever: MemoryRetriever | None = None,
+    memory_top_k: int = 5,
+    memory_types: list[str] | None = None,
 ) -> tuple[VerificationReport, list[QBAFGraph], list[Argument], list[EvidenceItem], EvidenceGraph]:
     from src.main import _merge_dedup_evidence, _research_claims_parallel
 
@@ -575,7 +581,10 @@ def _rerun_from_claim_decomposition(
         if claim.claim_id in new_memory_by_claim:
             continue
         new_memory_by_claim[claim.claim_id] = (
-            memory_retriever.retrieve(case=legacy_case, claim=claim, evidence=raw_evidence, top_k=5)
+            memory_retriever.retrieve(
+                case=legacy_case, claim=claim, evidence=raw_evidence,
+                top_k=memory_top_k, memory_types=memory_types,
+            )
             if bundle.run_config.allow_memory_retrieval
             else []
         )

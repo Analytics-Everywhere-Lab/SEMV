@@ -1335,7 +1335,9 @@ class MemoryConsolidator:
                     continue
                 outcomes = {row.outcome for row in rows}
                 outcome = "contested" if "contested" in outcomes else (
-                    "successful" if "successful" in outcomes else "unknown"
+                    "unsuccessful" if "unsuccessful" in outcomes else (
+                        "successful" if "successful" in outcomes else "unknown"
+                    )
                 )
                 additions.append((use_id, outcome, max((row.created_at or "") for row in rows)))
             if not additions:
@@ -1347,6 +1349,7 @@ class MemoryConsolidator:
                 "usage_count": target.usage_count + len(additions),
                 "successful_usage_count": target.successful_usage_count + sum(1 for _, outcome, _ in additions if outcome == "successful"),
                 "contested_usage_count": target.contested_usage_count + sum(1 for _, outcome, _ in additions if outcome == "contested"),
+                "unsuccessful_usage_count": target.unsuccessful_usage_count + sum(1 for _, outcome, _ in additions if outcome == "unsuccessful"),
                 "last_used_at": max(timestamp for _, _, timestamp in additions) or target.last_used_at,
                 "updated_at": utc_now_iso(),
                 "metadata": metadata,

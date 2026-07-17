@@ -8,6 +8,7 @@ from typing import Any
 
 from PIL import Image
 
+from src.utils.diagnostics import record_fallback
 from src.utils.hashing import sha256_file, stable_hash_text
 from src.utils.io import project_root
 from src.utils.tool_config import media_config
@@ -82,7 +83,8 @@ class VisualIndex:
                 if phash:
                     phashes_to_write.append({"asset_id": asset_id, "phash": phash})
                 existing_sha.add(digest)
-            except Exception:
+            except Exception as exc:
+                record_fallback("visual_index", exc, "skip_unindexable_asset")
                 continue
 
         self._append_jsonl(self.assets_path, assets_to_write)
@@ -98,8 +100,8 @@ class VisualIndex:
         query_sha = None
         try:
             query_sha = sha256_file(query)
-        except Exception:
-            pass
+        except Exception as exc:
+            record_fallback("visual_index", exc, "search_without_sha256")
 
         matches: dict[str, dict[str, Any]] = {}
         if "phash" in self.methods:
@@ -122,8 +124,8 @@ class VisualIndex:
                 if distance <= self.phash_threshold:
                     result["phash_distance"] = distance
                     result["methods"].append("phash")
-            except Exception:
-                pass
+            except Exception as exc:
+                record_fallback("visual_index", exc, "continue_without_phash_comparison")
         if "clip_faiss" in self.methods:
             qvec = self._clip_embedding(query)
             cvec = self._clip_embedding(candidate)
@@ -145,7 +147,8 @@ class VisualIndex:
     ) -> list[dict[str, Any]]:
         try:
             query_hash = self._phash(query)
-        except Exception:
+        except Exception as exc:
+            record_fallback("visual_index", exc, "empty_phash_matches")
             return []
         matches = []
         for row in self._rows():
@@ -156,7 +159,8 @@ class VisualIndex:
                 continue
             try:
                 distance = self._hash_distance(query_hash, phash)
-            except Exception:
+            except Exception as exc:
+                record_fallback("visual_index", exc, "skip_invalid_phash_row")
                 continue
             if distance <= self.phash_threshold:
                 matches.append({**row, "phash_distance": distance, "clip_similarity": None, "methods": ["phash"]})
@@ -180,7 +184,8 @@ class VisualIndex:
             if index.ntotal == 0:
                 return []
             scores, ids = index.search(np.asarray([query_vec], dtype="float32"), min(10, index.ntotal))
-        except Exception:
+        except Exception as exc:
+            record_fallback("visual_index", exc, "empty_clip_matches")
             return []
         meta_by_vector = {int(row["clip_vector_id"]): row for row in self._jsonl_rows(self.clip_meta_path) if row.get("clip_vector_id") is not None}
         assets = {row.get("asset_id"): row for row in self._rows()}
@@ -261,7 +266,8 @@ class VisualIndex:
                 vector = model.encode_image(image)
                 vector = vector / vector.norm(dim=-1, keepdim=True)
             return vector.detach().cpu().numpy().astype("float32")[0]
-        except Exception:
+        except Exception as exc:
+            record_fallback("visual_index", exc, "optional_backend_unavailable")
             return None
 
     def _load_clip_backend(self) -> tuple[Any, Any, Any, Any] | None:
@@ -278,7 +284,8 @@ class VisualIndex:
             model.eval()
             self._clip_backend = (open_clip, torch, model, preprocess)
             return self._clip_backend
-        except Exception:
+        except Exception as exc:
+            record_fallback("visual_index", exc, "optional_backend_unavailable")
             return None
 
     @staticmethod
@@ -287,7 +294,8 @@ class VisualIndex:
             import faiss
 
             return faiss
-        except Exception:
+        except Exception as exc:
+            record_fallback("visual_index", exc, "optional_backend_unavailable")
             return None
 
     @staticmethod
@@ -296,7 +304,8 @@ class VisualIndex:
             import numpy
 
             return numpy
-        except Exception:
+        except Exception as exc:
+            record_fallback("visual_index", exc, "optional_backend_unavailable")
             return None
 
     @staticmethod

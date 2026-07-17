@@ -3,6 +3,7 @@ from __future__ import annotations
 from src.schemas.case_schema import MultimediaCase
 from src.schemas.claim_schema import ClaimType, SubClaim
 from src.schemas.evidence_schema import EvidenceItem
+from src.utils.diagnostics import record_fallback
 from src.utils.hashing import stable_hash_text
 from src.utils.llm_client import LLMClient
 
@@ -45,8 +46,8 @@ class ClaimDecomposer:
                     )
             if subclaims:
                 return self._ensure_all_types(case, subclaims)
-        except Exception:
-            pass
+        except Exception as exc:
+            record_fallback("claim_decomposition", exc, "deterministic_claim_templates", case_id=case.case_id)
         return [
             SubClaim(
                 claim_id=self._claim_id(case.case_id, claim_type),

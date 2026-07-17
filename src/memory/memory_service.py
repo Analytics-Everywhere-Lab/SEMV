@@ -103,6 +103,7 @@ class MemoryService:
         source_clusters=None,
         top_k=None,
         include_short_term: bool = False,
+        memory_types: list[str] | None = None,
     ):
         extra_records = None
         if include_short_term and self.config.short_term.retrieve_during_bootstrap:
@@ -118,6 +119,7 @@ class MemoryService:
             source_clusters=source_clusters,
             top_k=top_k,
             extra_records=extra_records,
+            memory_types=memory_types,
         )
 
     @staticmethod
@@ -146,8 +148,11 @@ class MemoryService:
             metadata={"short_term": True, "stm_id": row.stm_id},
         )
 
-    def retrieve(self, case, claim, evidence, top_k=None):
-        return self.retriever.retrieve(case=case, claim=claim, evidence=evidence, top_k=top_k)
+    def retrieve(self, case, claim, evidence, top_k=None, memory_types=None):
+        return self.retriever.retrieve(
+            case=case, claim=claim, evidence=evidence, top_k=top_k,
+            memory_types=memory_types,
+        )
 
     # ---------------------------------------------------------------- staging
 
